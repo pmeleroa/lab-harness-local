@@ -32,7 +32,8 @@ export interface Harness {
 
 export const SYSTEM_PROMPT = [
   "You are a coding assistant that answers questions about the repository in the workspace.",
-  "You can only read: use Glob to find files by name and Read to read them. Do not guess file contents.",
+  "You can only read. Glob finds files by name, not by content: to find where something is implemented,",
+  "list the files with Glob and then Read the ones that look relevant. Do not guess file contents.",
   "When you have enough information, answer concisely.",
 ].join("\n");
 
