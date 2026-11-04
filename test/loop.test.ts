@@ -122,6 +122,19 @@ describe("final: max_tokens", () => {
   });
 });
 
+describe("finales secundarios", () => {
+  it("max_tool_calls: corta al superar el tope de llamadas del run", async () => {
+    const { agent } = setup((_req, turn) => ({ content: [use(`c${turn}`, "Glob", { pattern: `*${turn}.ts` })] }), { maxToolCalls: 2 });
+    expect(await agent.run("busca")).toMatchObject({ reason: "max_tool_calls", toolCalls: 2 });
+    expectEveryCallAnswered(agent.messages);
+  });
+
+  it("refusal: el proveedor rechaza la petición", async () => {
+    const { agent } = setup(() => ({ content: [text("No puedo ayudar con eso.")], stopReason: "refusal" }));
+    expect((await agent.run("algo")).reason).toBe("refusal");
+  });
+});
+
 describe("final: error", () => {
   it("un proveedor que lanza termina el run con error, sin excepción", async () => {
     const provider: Provider = {
