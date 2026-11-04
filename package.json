@@ -1,0 +1,25 @@
+{
+  "name": "lab-harness-local",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Un agente de código para terminal, construido parte a parte: bucle, contrato de inferencia y herramientas de lectura",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
