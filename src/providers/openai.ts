@@ -87,7 +87,7 @@ export function toOpenAIParams(req: CanonicalRequest): ChatParams {
 }
 
 function mapFinish(s: string | null | undefined, hasToolCalls: boolean): StopReason {
-  // Algunos servidores (Ollama) cierran con "stop" aunque haya tool calls.
+  // Algunos servidores cierran con "stop" aunque haya tool calls.
   if (hasToolCalls && (s === "stop" || s === "tool_calls" || s === "function_call" || !s)) return "tool_use";
   switch (s) {
     case "stop":
