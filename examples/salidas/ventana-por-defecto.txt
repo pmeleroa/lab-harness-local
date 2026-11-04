@@ -1,0 +1,18 @@
+workspace: <repo>/examples/demo
+modelo: qwen2.5:7b
+
+Vamos a buscar primero en qué fichero está la regla de descuentos utilizando un patrón amplio.
+
+> Glob {"pattern":"*.ts"}
+  ok (16 ms)
+Vamos a revisar los archivos `src/cart.ts`, `src/pricing.ts`, y `test/pricing.test.ts` para encontrar la regla de descuentos.
+
+Primero, veamos el archivo `src/pricing.ts`:
+
+> Read {"file_path":"src/pricing.ts"}
+  ok (2 ms)
+La regla de descuento se encuentra en el archivo `src/pricing.ts`. Se aplica un descuento del 10% para pedidos de 100 EUR o más (antes de impuestos).
+
+El descuento se aplica a partir de un importe de 100 EUR. La lógica para aplicar el descuento está en la función `applyDiscount`, que se define en líneas 4 a 9 del archivo.
+
+[end_turn] 3 turnos, 2 llamadas, 197 tokens de entrada, 215 de salida
