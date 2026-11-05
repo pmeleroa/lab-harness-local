@@ -12,6 +12,7 @@ Uso: npm run dev -- [opciones] "<pregunta>"
   -m, --model <id>        modelo (defecto: $HARNESS_MODEL o qwen2.5:7b)
       --base-url <url>    endpoint compatible con chat completions, con /v1
                           (defecto: $OPENAI_BASE_URL o http://localhost:11434/v1)
+      --context-window <n>  ventana de contexto del modelo, en tokens (defecto: 4096)
       --max-turns <n>     turnos máximos del run (defecto: 25)
   -h, --help
 `;
@@ -22,6 +23,7 @@ const { values, positionals } = parseArgs({
     workspace: { type: "string", short: "w" },
     model: { type: "string", short: "m" },
     "base-url": { type: "string" },
+    "context-window": { type: "string" },
     "max-turns": { type: "string" },
     help: { type: "boolean", short: "h" },
   },
@@ -39,12 +41,21 @@ if (maxTurns !== undefined && (!Number.isInteger(maxTurns) || maxTurns < 1)) {
   process.exit(2);
 }
 
-const { agent, bus, workspace, model } = createHarness({
+const contextWindow = values["context-window"] ? Number(values["context-window"]) : undefined;
+if (contextWindow !== undefined && (!Number.isInteger(contextWindow) || contextWindow < 1)) {
+  process.stderr.write("--context-window debe ser un entero positivo\n");
+  process.exit(2);
+}
+
+const { agent, bus, workspace, model, warnings } = createHarness({
   ...(values.workspace ? { workspace: values.workspace } : {}),
   ...(values.model ? { model: values.model } : {}),
   ...(values["base-url"] ? { baseURL: values["base-url"] } : {}),
-  ...(maxTurns ? { config: { maxTurns } } : {}),
+  config: { ...(maxTurns ? { maxTurns } : {}), ...(contextWindow ? { contextWindow } : {}) },
 });
+
+/** 1234 -> 1,2k; 4096 -> 4,1k */
+const k = (n: number) => (n >= 1_000 ? `${(n / 1_000).toFixed(1).replace(".", ",")}k` : String(n));
 
 const short = (v: unknown) => {
   const s = JSON.stringify(v);
@@ -65,14 +76,22 @@ bus.on((e: AgentEvent) => {
         ? `  ${e.result.is_error ? "error" : "ok"} (${e.durationMs} ms)`
         : e.t === "warning"
           ? `! ${e.message}`
-          : null;
+          : e.t === "context"
+            ? `~ ${e.action === "cleared" ? `limpiados ${e.count} resultados antiguos` : "conversación compactada"}: ${k(e.before)} -> ${k(e.after)} tokens`
+            : e.t === "turn_end"
+              ? e.truncated
+                ? "ctx ? (el servidor recortó la conversación)"
+                : `ctx ${k(e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens + e.usage.outputTokens)}/${k(agent.contextWindow)} (${Math.round(((e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens + e.usage.outputTokens) / agent.contextWindow) * 100)}%)`
+              : null;
   if (line === null) return;
   if (!atLineStart) process.stdout.write("\n");
   process.stderr.write(`${line}\n`);
   atLineStart = true;
 });
 
-process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\n\n`);
+process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\n`);
+for (const w of warnings) process.stderr.write(`! ${w}\n`);
+process.stderr.write("\n");
 const ctl = new AbortController();
 process.once("SIGINT", () => ctl.abort());
 

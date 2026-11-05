@@ -1,7 +1,7 @@
 import path from "node:path";
 import { Agent, type AgentConfig, defaultAgentConfig } from "./core/loop.js";
 import { EventBus } from "./core/events.js";
-import { OpenAIProvider } from "./providers/openai.js";
+import { DEFAULT_CONTEXT_WINDOW, OpenAIProvider } from "./providers/openai.js";
 import type { Provider } from "./providers/canonical.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { readTool } from "./tools/read.js";
@@ -28,6 +28,8 @@ export interface Harness {
   registry: ToolRegistry;
   workspace: string;
   model: string;
+  /** Avisos de arranque (por ejemplo, que se asume la ventana por defecto). */
+  warnings: string[];
 }
 
 export const SYSTEM_PROMPT = [
@@ -43,18 +45,26 @@ export function createHarness(o: HarnessOptions = {}): Harness {
   const model = o.model ?? process.env.HARNESS_MODEL ?? DEFAULT_MODEL;
   const provider =
     o.provider ?? new OpenAIProvider({ baseURL: o.baseURL ?? process.env.OPENAI_BASE_URL ?? DEFAULT_BASE_URL });
+  const warnings: string[] = [];
+  if (!o.provider && !o.config?.contextWindow) {
+    warnings.push(
+      `La ventana de contexto no está fijada: se asumen ${DEFAULT_CONTEXT_WINDOW} tokens. Indícala con --context-window; ` +
+        "un servidor con menos ventana recorta la conversación sin avisar.",
+    );
+  }
   const registry = new ToolRegistry().register(readTool, globTool);
   const bus = new EventBus();
   const agent = new Agent(
     { provider, registry, bus, workspace, system: [{ text: `${SYSTEM_PROMPT}\nWorkspace: ${workspace}` }] },
     { ...defaultAgentConfig(model), ...o.config },
   );
-  return { agent, bus, registry, workspace, model };
+  return { agent, bus, registry, workspace, model, warnings };
 }
 
 export { Agent, EventBus, OpenAIProvider, ToolRegistry };
 export type * from "./providers/canonical.js";
 export type * from "./core/events.js";
 export type { AgentConfig, RunResult } from "./core/loop.js";
+export type { ContextPolicy } from "./context/manager.js";
 export type { Tool, ToolCtx, ToolOutput } from "./tools/types.js";
 export { defineTool } from "./tools/types.js";
