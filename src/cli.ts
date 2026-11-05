@@ -4,7 +4,7 @@ import { createHarness } from "./index.js";
 import type { AgentEvent } from "./core/events.js";
 import { VERSION } from "./version.js";
 
-const HELP = `lab-harness-local ${VERSION}: un agente de solo lectura para preguntar sobre un repositorio
+const HELP = `lab-harness-local ${VERSION}: un harness de solo lectura para preguntar sobre un repositorio
 
 Uso: npm run dev -- [opciones] "<pregunta>"
 

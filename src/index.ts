@@ -11,7 +11,7 @@ export const DEFAULT_MODEL = "qwen2.5:7b";
 export const DEFAULT_BASE_URL = "http://localhost:11434/v1";
 
 export interface HarnessOptions {
-  /** Directorio sobre el que trabaja el agente. Las herramientas no salen de él. */
+  /** Directorio sobre el que trabaja el harness. Las herramientas no salen de él. */
   workspace?: string;
   /** Sobrescribe $HARNESS_MODEL. */
   model?: string;

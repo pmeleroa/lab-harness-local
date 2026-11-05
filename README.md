@@ -1,6 +1,6 @@
 # lab-harness-local
 
-Un agente de código para terminal, construido parte a parte para entender cómo funciona por dentro. Acompaña a la serie «Asistente de código local» de [pablomeleroalonso.me](https://pablomeleroalonso.me).
+Un harness para agentes de código en terminal, construido parte a parte para entender cómo funcionan estos agentes por dentro. Acompaña a la serie «Asistente de código local» de [pablomeleroalonso.me](https://pablomeleroalonso.me).
 
 Esta versión (tag `parte-2`) es de **solo lectura**: un bucle con streaming, un contrato de inferencia con un adaptador a `/v1/chat/completions` y dos herramientas, `Read` y `Glob`. Cada parte de la serie añade commits y un tag nuevo.
 
@@ -32,7 +32,7 @@ npm test
 npm run dev -- --workspace examples/demo "¿A partir de qué importe se aplica descuento y en qué fichero está esa regla?"
 ```
 
-El agente muestra cada llamada a herramienta por la salida de error y la respuesta por la salida estándar.
+El harness muestra cada llamada a herramienta por la salida de error y la respuesta por la salida estándar.
 
 | Opción | Efecto |
 |---|---|
