@@ -205,3 +205,33 @@ describe("looksTruncated", () => {
     expect(looksTruncated(null, { tokens: 590, estimate: 400 })).toBe(false);
   });
 });
+
+describe("instrucciones del proyecto (AGENTS.md)", () => {
+  const script: Script = (req) => {
+    if (isSummaryRequest(req)) return { content: [text("<summary>Leídos a, b y c.</summary>")] };
+    const reads = results(req.messages).length;
+    if (JSON.stringify(req.messages).includes("conversation_summary") || reads >= 3) return { content: [text("hecho")] };
+    return { content: [use(`r${reads}`, "Read", { file_path: `${"abc"[reads]}.txt` })] };
+  };
+  const files = { "a.txt": bigFile(3_000), "b.txt": bigFile(3_000), "c.txt": bigFile(3_000) };
+  const policy = { context: { maxToolResultTokens: 25_000, clearAt: 0.99, compactAt: 0.5, keepToolResults: 6 } };
+
+  it("su contenido sigue en la petición tras compactar", async () => {
+    const { agent, provider, events } = setup(script, { files: { ...files, "AGENTS.md": "Responde siempre en español.\n" }, config: policy });
+    await agent.run("lee a, b y c");
+    expect(events.some((e) => e.t === "context" && e.action === "compacted")).toBe(true);
+    const system = (r: { system: { text: string }[] }) => r.system.map((p) => p.text).join("\n");
+    expect(system(provider.requests[0]!)).toContain("Responde siempre en español.");
+    expect(system(provider.requests.at(-1)!)).toContain("Responde siempre en español.");
+    // Está en el system prompt, no en la conversación: la compaction no lo ha resumido ni borrado.
+    expect(JSON.stringify(agent.messages)).not.toContain("Responde siempre en español.");
+  });
+
+  it("el run funciona sin el fichero, y con uno vacío", async () => {
+    for (const extra of [{} as Record<string, string>, { "AGENTS.md": "  \n" }]) {
+      const { agent, provider } = setup(script, { files: { ...files, ...extra }, config: policy });
+      expect((await agent.run("lee a, b y c")).reason).toBe("end_turn");
+      expect(provider.requests[0]!.system.map((p) => p.text).join("\n")).not.toContain("Project instructions");
+    }
+  });
+});

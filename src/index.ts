@@ -1,6 +1,7 @@
 import path from "node:path";
 import { Agent, type AgentConfig, defaultAgentConfig } from "./core/loop.js";
 import { EventBus } from "./core/events.js";
+import { loadInstructions } from "./context/instructions.js";
 import { DEFAULT_CONTEXT_WINDOW, OpenAIProvider } from "./providers/openai.js";
 import type { Provider } from "./providers/canonical.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -54,8 +55,10 @@ export function createHarness(o: HarnessOptions = {}): Harness {
   }
   const registry = new ToolRegistry().register(readTool, globTool);
   const bus = new EventBus();
+  const instructions = loadInstructions(workspace);
+  const system = [{ text: `${SYSTEM_PROMPT}\nWorkspace: ${workspace}` }, ...(instructions ? [{ text: instructions }] : [])];
   const agent = new Agent(
-    { provider, registry, bus, workspace, system: [{ text: `${SYSTEM_PROMPT}\nWorkspace: ${workspace}` }] },
+    { provider, registry, bus, workspace, system },
     { ...defaultAgentConfig(model), ...o.config },
   );
   return { agent, bus, registry, workspace, model, warnings };
