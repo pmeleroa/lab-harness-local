@@ -1,3 +1,4 @@
+import { estimateRequest } from "../src/context/manager.js";
 import type { Block, CanonicalRequest, Message, Provider, ProviderEvent, StopReason } from "../src/providers/canonical.js";
 
 export type Script = (req: CanonicalRequest, turn: number) => { content: Block[]; stopReason?: StopReason };
@@ -12,7 +13,23 @@ export class FakeProvider implements Provider {
   readonly requests: CanonicalRequest[] = [];
   private turn = 0;
 
-  constructor(private script: Script) {}
+  constructor(
+    private script: Script,
+    /**
+     * `truncate` imita a un servidor que recorta lo que no cabe y responde con normalidad (como Ollama con HTTP 200):
+     * si la petición estimada pasa de `window`, informa de un uso que no crece. `collapse`: solo sobrevive lo mínimo;
+     * `plateau`: se queda cerca de la ventana.
+     */
+    private opts: { truncate?: { window: number; mode?: "collapse" | "plateau" } } = {},
+  ) {}
+
+  /** El uso informado es la estimación de la petición, como el de un servidor real. */
+  private inputTokens(req: CanonicalRequest): number {
+    const real = estimateRequest(req);
+    const t = this.opts.truncate;
+    if (!t || real <= t.window) return real;
+    return t.mode === "plateau" ? Math.floor(t.window * 0.9) : 63;
+  }
 
   async *stream(req: CanonicalRequest, _signal: AbortSignal): AsyncIterable<ProviderEvent> {
     // Copia profunda: el loop muta `messages` después.
@@ -25,7 +42,7 @@ export class FakeProvider implements Provider {
       t: "message_end",
       message,
       stopReason: stopReason ?? (hasTools ? "tool_use" : "end_turn"),
-      usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      usage: { inputTokens: this.inputTokens(req), outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
     };
   }
 }

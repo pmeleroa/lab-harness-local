@@ -13,6 +13,17 @@ import {
   textOf,
   toolUses,
 } from "../providers/canonical.js";
+import {
+  type ContextPolicy,
+  COMPACT_PROMPT,
+  ToolResultClearing,
+  capToolResult,
+  defaultContextPolicy,
+  estimateRequest,
+  extractSummary,
+  summaryMessage,
+} from "../context/manager.js";
+import { OVERFLOW_MIN_GROWTH_COMPACT, type RequestSample, looksTruncated } from "../context/overflow.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { AgentEvent, AgentState, EventBus, RunEndReason } from "./events.js";
 
@@ -24,6 +35,10 @@ export interface AgentConfig {
   maxToolCalls: number;
   /** Misma llamada fallando N veces seguidas => el modelo está atascado. */
   maxRepeatedFailures: number;
+  /** Ventana de contexto del modelo. Sin ella, la que declara el provider. */
+  contextWindow?: number;
+  /** Tope de tool_results, clearing y compaction (ver context/manager.ts). */
+  context: ContextPolicy;
 }
 
 export const defaultAgentConfig = (model: string): AgentConfig => ({
@@ -32,6 +47,7 @@ export const defaultAgentConfig = (model: string): AgentConfig => ({
   maxTurns: 25,
   maxToolCalls: 100,
   maxRepeatedFailures: 3,
+  context: defaultContextPolicy,
 });
 
 export interface AgentDeps {
@@ -54,9 +70,17 @@ export interface RunResult {
 
 const INTERRUPTED = "Interrupted by user before this tool ran.";
 
+/** Parte de la ventana que como máximo se reserva para la respuesta. */
+const RESERVE_FRACTION = 0.25;
+
 export class Agent {
   readonly messages: Message[] = [];
   private _state: AgentState = "idle";
+  private readonly clearing = new ToolResultClearing();
+  /** Tokens reales de la última petición y lo que estimábamos de ella: calibra la estimación de lo añadido después. */
+  private measured: { tokens: number; estimate: number } | null = null;
+  /** La última petición que el servidor no recortó: base para detectar que la siguiente sí lo ha sido. */
+  private lastSample: RequestSample | null = null;
 
   constructor(
     private deps: AgentDeps,
@@ -65,6 +89,26 @@ export class Agent {
 
   get state(): AgentState {
     return this._state;
+  }
+
+  get contextWindow(): number {
+    return this.cfg.contextWindow ?? this.deps.provider.capabilities.contextWindow;
+  }
+
+  /** Lo que ocuparía ahora la petición: el último uso real más la estimación de lo añadido desde entonces. */
+  contextTokens(): number {
+    const estimate = estimateRequest(this.buildRequest());
+    return this.measured ? Math.max(0, this.measured.tokens + estimate - this.measured.estimate) : estimate;
+  }
+
+  /** Reserva para la respuesta: `maxTokens`, sin pasar del 25 % de la ventana. También es el `max_tokens` que se envía. */
+  get reserve(): number {
+    return Math.max(1, Math.min(this.cfg.maxTokens, Math.floor(this.contextWindow * RESERVE_FRACTION)));
+  }
+
+  /** Espacio para la entrada: la ventana menos lo reservado para la respuesta. */
+  private get available(): number {
+    return Math.max(1, this.contextWindow - this.reserve);
   }
 
   /**
@@ -95,12 +139,16 @@ export class Agent {
       let stopReason: StopReason;
       let turnUsage: Usage;
       try {
+        usage = addUsage(usage, await this.manageContext(signal));
         const res = await this.callModel(signal);
         assistant = res.message;
         stopReason = res.stopReason;
         turnUsage = res.usage;
         usage = addUsage(usage, res.usage);
-        this.emit({ t: "turn_end", turn, usage: res.usage });
+        this.emit({ t: "turn_end", turn, usage: res.usage, ...(res.truncated ? { truncated: true } : {}) });
+        // El servidor recortó la conversación y respondió igual: lo dicho no parte de la tarea. Se descarta la
+        // respuesta, la historia sigue completa en `messages` y el run acaba con nombre en vez de pasar por normal.
+        if (res.truncated) return end("context_overflow", turn, this.overflowMessage(res.sent));
       } catch (e) {
         // Abort durante el stream: el mensaje parcial se descarta, el emparejamiento sigue intacto.
         if (signal.aborted) return end("aborted", turn - 1);
@@ -165,17 +213,112 @@ export class Agent {
       model: this.cfg.model,
       system: this.deps.system,
       tools: this.deps.registry.specs(),
-      messages: this.messages,
-      maxTokens: this.cfg.maxTokens,
+      messages: this.clearing.view(this.messages),
+      maxTokens: this.reserve,
     };
   }
 
   private async callModel(signal: AbortSignal) {
-    for await (const ev of this.deps.provider.stream(this.buildRequest(), signal)) {
+    const req = this.buildRequest();
+    const estimate = estimateRequest(req);
+    for await (const ev of this.deps.provider.stream(req, signal)) {
       if (ev.t === "text_delta") this.emit({ t: "text_delta", text: ev.text });
-      else if (ev.t === "message_end") return ev;
+      else if (ev.t === "message_end") {
+        const u = ev.usage;
+        const tokens = u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens;
+        // Un dato de una petición recortada no calibra: haría creer que hay sitio.
+        const truncated = looksTruncated(this.lastSample, { tokens, estimate });
+        // Un provider sin uso (0) no calibra: mejor la estimación sola.
+        if (tokens > 0 && !truncated) {
+          this.measured = { tokens, estimate };
+          this.lastSample = { tokens, estimate };
+        }
+        return { ...ev, truncated, sent: { tokens, estimate } };
+      }
     }
     throw new Error("Provider stream ended without message_end");
+  }
+
+  private overflowMessage(sent: RequestSample): string {
+    return (
+      `The server answered, but it reported ${sent.tokens} prompt tokens for a conversation estimated at ${sent.estimate}: ` +
+      `it most likely dropped the start of the conversation, the task included, and answered without it. ` +
+      `The configured context window is ${this.contextWindow} tokens. Set the real one with --context-window, ` +
+      `or raise the server's (Ollama: OLLAMA_CONTEXT_LENGTH).`
+    );
+  }
+
+  /**
+   * Antes de cada llamada: si el contexto pasa de `clearAt`, limpia tool_results antiguos; si aun así pasa de
+   * `compactAt`, compacta. Devuelve el consumo de la compaction (cuenta para el run).
+   */
+  private async manageContext(signal: AbortSignal): Promise<Usage> {
+    const p = this.cfg.context;
+    let used = this.contextTokens();
+    if (used > p.clearAt * this.available) {
+      const { count } = this.clearing.clearOld(this.messages, p.keepToolResults);
+      if (count) {
+        const after = this.contextTokens();
+        this.emit({ t: "context", action: "cleared", count, before: used, after });
+        used = after;
+      }
+    }
+    if (used <= p.compactAt * this.available) return emptyUsage();
+    try {
+      return (await this.compact(signal)) ?? emptyUsage();
+    } catch (e) {
+      if (signal.aborted) throw e;
+      this.emit({ t: "warning", message: `Compaction failed: ${errorMessage(e)}` });
+      return emptyUsage();
+    }
+  }
+
+  /**
+   * Sustituye la conversación por un resumen escrito por el modelo. Un último prompt del usuario sin
+   * tool_results se conserva literal detrás del resumen. Devuelve el consumo, o null si no había nada que compactar.
+   */
+  async compact(signal: AbortSignal = new AbortController().signal): Promise<Usage | null> {
+    const last = this.messages.at(-1);
+    const keep = last?.role === "user" && !last.content.some((b) => b.type === "tool_result") ? last : null;
+    const history = this.clearing.view(keep ? this.messages.slice(0, -1) : this.messages);
+    if (history.length === 0) return null;
+
+    const tail = history.at(-1)!;
+    const messages: Message[] =
+      tail.role === "user"
+        ? [...history.slice(0, -1), { role: "user", content: [...tail.content, { type: "text", text: COMPACT_PROMPT }] }]
+        : [...history, { role: "user", content: [{ type: "text", text: COMPACT_PROMPT }] }];
+
+    const before = this.contextTokens();
+    const req = { ...this.buildRequest(), messages };
+    let end: { message: Message; usage: Usage } | null = null;
+    for await (const ev of this.deps.provider.stream(req, signal)) if (ev.t === "message_end") end = ev;
+    if (!end) throw new Error("Provider stream ended without message_end");
+    // Si el servidor recortó la propia petición, el resumen no parte de la conversación entera (y quizá ni de la tarea):
+    // sustituirla por él borraría la historia. Mejor un error, que manageContext convierte en aviso.
+    const sent = { tokens: end.usage.inputTokens + end.usage.cacheReadTokens + end.usage.cacheWriteTokens, estimate: estimateRequest(req) };
+    if (looksTruncated(this.lastSample, sent, OVERFLOW_MIN_GROWTH_COMPACT)) {
+      throw new Error(
+        `the server truncated the compaction request (${sent.tokens} prompt tokens for an estimated ${sent.estimate}), so the summary would miss part of the conversation; ` +
+          `the conversation was left as it was. Set the real context window with --context-window.`,
+      );
+    }
+    const summary = extractSummary(textOf(end.message));
+    if (!summary) throw new Error("the model returned an empty summary");
+
+    const next = summaryMessage(summary);
+    if (keep) next.content.push(...keep.content);
+    this.messages.splice(0, this.messages.length, next);
+    this.clearing.reset();
+    this.measured = null;
+    this.lastSample = null;
+    this.emit({ t: "context", action: "compacted", before, after: this.contextTokens() });
+    return end.usage;
+  }
+
+  /** Tope de un tool_result: el de la política, y nunca más del 20 % del espacio útil. */
+  private get toolResultCap(): number {
+    return Math.min(this.cfg.context.maxToolResultTokens, Math.floor(this.available * 0.2));
   }
 
   /**
@@ -221,7 +364,7 @@ export class Agent {
     let out: ToolResultBlock;
     try {
       const r = await tool.run(input, { workspace: this.deps.workspace, signal, callId: call.id });
-      out = result(r.content, !!r.isError);
+      out = result(capToolResult(r.content, this.toolResultCap), !!r.isError);
     } catch (e) {
       out = result(`Tool ${call.name} failed: ${errorMessage(e)}`, true);
     }

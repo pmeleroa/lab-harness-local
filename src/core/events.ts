@@ -11,7 +11,10 @@ export type AgentEvent =
   | { t: "text_delta"; text: string }
   | { t: "tool_start"; call: ToolUseBlock }
   | { t: "tool_end"; call: ToolUseBlock; result: ToolResultBlock; durationMs: number }
-  | { t: "turn_end"; turn: number; usage: Usage }
+  /** `truncated`: el servidor recortó la conversación; su uso no sirve para calibrar el contexto. */
+  | { t: "turn_end"; turn: number; usage: Usage; truncated?: boolean }
+  /** El loop liberó contexto: limpió `count` tool_results antiguos o compactó la conversación. En tokens. */
+  | { t: "context"; action: "cleared" | "compacted"; before: number; after: number; count?: number }
   | { t: "warning"; message: string }
   | { t: "run_end"; reason: RunEndReason; usage: Usage; turns: number };
 
@@ -27,6 +30,8 @@ export type RunEndReason =
   | "max_tool_calls"
   /** La misma llamada falló N veces seguidas: el modelo está atascado. */
   | "repeated_failure"
+  /** El servidor recortó la conversación y respondió con normalidad: lo respondido no parte de la tarea. */
+  | "context_overflow"
   /** El modelo terminó sin texto ni tool call, también tras avisarle. */
   | "empty_response"
   | "error";
