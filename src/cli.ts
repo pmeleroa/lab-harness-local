@@ -73,7 +73,7 @@ bus.on((e: AgentEvent) => {
     e.t === "tool_start"
       ? `> ${e.call.name} ${short(e.call.input)}`
       : e.t === "tool_end"
-        ? `  ${e.result.is_error ? "error" : "ok"} (${e.durationMs} ms)`
+        ? `  ${e.result.is_error ? "error" : "ok"} (${e.durationMs} ms${e.result.content.includes("characters omitted") ? ", recortado al tope" : ""})`
         : e.t === "warning"
           ? `! ${e.message}`
           : e.t === "context"

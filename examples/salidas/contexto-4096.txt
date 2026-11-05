@@ -1,0 +1,27 @@
+workspace: <repo>
+modelo: qwen2.5:7b
+
+ctx 638/4,1k (16%)
+> Glob {"pattern":"src/{version,index,tools/types,tools/registry,tools/read,core/events,context/overflow,in…
+  ok (13 ms)
+ctx 882/4,1k (22%)
+> Read {"file_path":"src/index.ts"}
+> Read {"file_path":"src/core/events.ts"}
+> Read {"file_path":"src/context/overflow.ts"}
+> Read {"file_path":"src/tools/read.ts"}
+> Read {"file_path":"src/tools/registry.ts"}
+> Read {"file_path":"src/tools/types.ts"}
+> Read {"file_path":"src/version.ts"}
+  ok (1 ms, recortado al tope)
+  ok (1 ms)
+  ok (1 ms, recortado al tope)
+  ok (1 ms)
+  ok (1 ms, recortado al tope)
+  ok (1 ms, recortado al tope)
+  ok (2 ms)
+~ limpiados 1 resultados antiguos: 4,3k -> 3,7k tokens
+~ conversación compactada: 3,7k -> 849 tokens
+Ready to continue or answer any specific questions about the code. What would you like to know?
+ctx 850/4,1k (21%)
+
+[end_turn] 3 turnos, 8 llamadas, 3512 tokens de entrada, 529 de salida
