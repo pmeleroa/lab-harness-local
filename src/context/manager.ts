@@ -132,6 +132,8 @@ export function summaryMessage(summary: string): Message {
 }
 
 export function extractSummary(text: string): string {
-  const m = /<summary>([\s\S]*?)(?:<\/summary>|$)/.exec(text);
+  // Una etiqueta abierta y sin cerrar es un resumen cortado: no vale como resumen.
+  if (/<summary>/.test(text) && !/<summary>[\s\S]*?<\/summary>/.test(text)) return "";
+  const m = /<summary>([\s\S]*?)<\/summary>/.exec(text);
   return (m ? m[1]! : text).trim();
 }

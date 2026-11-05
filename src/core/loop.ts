@@ -291,7 +291,7 @@ export class Agent {
 
     const before = this.contextTokens();
     const req = { ...this.buildRequest(), messages };
-    let end: { message: Message; usage: Usage } | null = null;
+    let end: { message: Message; stopReason: StopReason; usage: Usage } | null = null;
     for await (const ev of this.deps.provider.stream(req, signal)) if (ev.t === "message_end") end = ev;
     if (!end) throw new Error("Provider stream ended without message_end");
     // Si el servidor recortó la propia petición, el resumen no parte de la conversación entera (y quizá ni de la tarea):
@@ -303,8 +303,16 @@ export class Agent {
           `the conversation was left as it was. Set the real context window with --context-window.`,
       );
     }
+    // Un resumen cortado por max_tokens (o rechazado) no está completo: sustituir la historia por él perdería
+    // restricciones y trabajo pendiente. Se deja la conversación como estaba.
+    if (end.stopReason === "max_tokens" || end.stopReason === "refusal") {
+      throw new Error(
+        `the summary was not completed (stop reason: ${end.stopReason}, output limit ${req.maxTokens} tokens); the conversation was left as it was. ` +
+          `Raise the context window or maxTokens so the summary fits.`,
+      );
+    }
     const summary = extractSummary(textOf(end.message));
-    if (!summary) throw new Error("the model returned an empty summary");
+    if (!summary) throw new Error("the model returned an empty or unterminated summary");
 
     const next = summaryMessage(summary);
     if (keep) next.content.push(...keep.content);

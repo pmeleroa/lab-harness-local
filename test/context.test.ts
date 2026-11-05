@@ -97,6 +97,24 @@ describe("escalón 3: compactar", () => {
   it("extractSummary toma lo de dentro de <summary>", () => {
     expect(extractSummary("antes <summary> el resumen </summary> después")).toBe("el resumen");
   });
+
+  it("extractSummary no acepta una etiqueta <summary> sin cerrar", () => {
+    expect(extractSummary("<summary>1. Objetivo: arreglar")).toBe("");
+  });
+
+  it("compact() deja la historia intacta si el resumen acaba por max_tokens", async () => {
+    const s = setup(
+      (req, turn) => {
+        if (isSummaryRequest(req)) return { content: [text("<summary>1. Objetivo: arre")], stopReason: "max_tokens" };
+        return turn === 1 ? { content: [use("t1", "Read", { file_path: "a.txt" })] } : { content: [text("hecho")] };
+      },
+      { files: { "a.txt": bigFile(100) } },
+    );
+    await s.agent.run("lee a");
+    const before = JSON.stringify(s.agent.messages);
+    await expect(s.agent.compact()).rejects.toThrow(/not completed.*max_tokens/);
+    expect(JSON.stringify(s.agent.messages)).toBe(before);
+  });
 });
 
 describe("reserva de respuesta proporcional a la ventana", () => {
