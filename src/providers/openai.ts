@@ -209,6 +209,12 @@ async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<Chunk>
   }
 }
 
+/**
+ * Ventana que se asume si no se indica otra. Baja a propósito: equivocarse por abajo solo adelanta la limpieza,
+ * por arriba desactiva los escalones y el servidor recorta la conversación sin avisar.
+ */
+export const DEFAULT_CONTEXT_WINDOW = 4_096;
+
 export interface OpenAIProviderOptions {
   /** Se envía como `Authorization: Bearer`. Ollama y vLLM sin --api-key no la necesitan. */
   apiKey?: string;
@@ -232,7 +238,7 @@ export class OpenAIProvider implements Provider {
     this.capabilities = {
       cache: false,
       parallelTools: true,
-      contextWindow: opts.contextWindow ?? 128_000,
+      contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     };
   }
 
