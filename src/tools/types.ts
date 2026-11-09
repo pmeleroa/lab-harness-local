@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -61,16 +61,32 @@ export function isInside(root: string, p: string): boolean {
 /**
  * Ruta real de `p`: resuelve los enlaces simbólicos con `realpath`. Si la ruta aún no existe (un `Write` nuevo), se
  * resuelve el ancestro más profundo que sí existe y se le añade el resto: un directorio que es un enlace hacia fuera
- * se detecta igual. No rechaza nada: decidir si se puede tocar es cosa del motor de permisos, que recibe esta ruta.
+ * se detecta igual. Un enlace colgante (que apunta a algo que no existe) se sigue con `readlink`: `writeFile` lo
+ * seguiría y crearía el destino, así que el motor tiene que ver el destino y no el nombre del enlace.
+ * No rechaza nada: decidir si se puede tocar es cosa del motor de permisos, que recibe esta ruta.
  */
 export function resolveReal(workspace: string, p: string): string {
-  const abs = resolvePath(workspace, p);
+  return resolveFrom(resolvePath(workspace, p), 0);
+}
+
+const MAX_LINK_HOPS = 40;
+
+function resolveFrom(abs: string, hops: number): string {
   const rest: string[] = [];
   let cur = abs;
   for (;;) {
     try {
       return path.join(realpathSync(cur), ...rest.reverse());
     } catch {
+      // ¿Es un enlace colgante? Se sustituye por su destino y se resuelve de nuevo.
+      try {
+        if (lstatSync(cur).isSymbolicLink() && hops < MAX_LINK_HOPS) {
+          const target = path.resolve(path.dirname(cur), readlinkSync(cur));
+          return resolveFrom(path.join(target, ...rest.reverse()), hops + 1);
+        }
+      } catch {
+        // no existe: se sube un nivel
+      }
       const parent = path.dirname(cur);
       if (parent === cur) return abs;
       rest.push(path.basename(cur));

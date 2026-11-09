@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -238,6 +238,35 @@ describe("Edit y Write: read-before-edit", () => {
     await readTool.run({ file_path: f }, c);
     expect((await editTool.run({ file_path: f, old_string: "a", new_string: "A" }, c)).isError).toBeUndefined();
     expect((await editTool.run({ file_path: f, old_string: "b", new_string: "B" }, c)).isError).toBeUndefined();
+  });
+
+  it("Edit falla si el contenido cambió con el mismo tamaño y la misma fecha", async () => {
+    const f = file("e8.txt", "abc\n");
+    const c = ctx();
+    await readTool.run({ file_path: f }, c);
+    const abs = path.join(workspace, f);
+    const snap = c.fileState.get(abs)!;
+    writeFileSync(abs, "xyz\n");
+    // Un reemplazo que conserva tamaño y fecha: se iguala la metadata del snapshot y solo queda distinto el hash.
+    c.fileState.record(abs, { ...snap, mtimeMs: statSync(abs).mtimeMs });
+    const r = await editTool.run({ file_path: f, old_string: "xyz", new_string: "q" }, c);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("modified since it was last read");
+    const w = await writeTool.run({ file_path: f, content: "pisado\n" }, c);
+    expect(w.isError).toBe(true);
+    expect(readFileSync(abs, "utf8")).toBe("xyz\n");
+  });
+
+  it("un enlace colgante hacia fuera se evalúa por su destino, también en cadena", () => {
+    const target = path.join(outside, "no-existe.txt");
+    symlinkSync(target, path.join(workspace, "colgante.txt"));
+    symlinkSync("colgante.txt", path.join(workspace, "cadena.txt"));
+    for (const name of ["colgante.txt", "cadena.txt"]) {
+      const w = decide(writeTool, { file_path: name, content: "x" }, { mode: "acceptEdits" });
+      expect(w.target.path, name).toBe(target);
+      expect(w.decision.kind, name).toBe("ask");
+      expect(decide(writeTool, { file_path: name, content: "x" }, { mode: "acceptEdits", rules: { deny: [`Edit(${outside}/**)`] } }).decision.kind, name).toBe("deny");
+    }
   });
 
   it("Write crea un fichero nuevo con sus directorios sin exigir lectura", async () => {

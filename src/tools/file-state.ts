@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 
 export interface FileSnapshot {
   mtimeMs: number;
@@ -35,9 +35,11 @@ export class FileStateCache {
     }
     const st = await stat(path).catch(() => null);
     if (!st) return null; // borrado desde la lectura: se permite recrearlo
-    if (st.mtimeMs !== snap.mtimeMs || st.size !== snap.size) {
-      return `File ${path} was modified since it was last read. Read it again before modifying it.`;
-    }
+    const modified = `File ${path} was modified since it was last read. Read it again before modifying it.`;
+    if (st.mtimeMs !== snap.mtimeMs || st.size !== snap.size) return modified;
+    // Un reemplazo externo puede conservar tamaño y fecha: el contenido manda.
+    const buf = await readFile(path).catch(() => null);
+    if (buf && hashContent(buf) !== snap.hash) return modified;
     return null;
   }
 }
