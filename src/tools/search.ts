@@ -2,9 +2,12 @@ import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { type ToolOutput, defineTool, isInside, resolveInWorkspace } from "./types.js";
+import { type ToolOutput, defineTool, isInside, resolveInWorkspace, truncateMiddle } from "./types.js";
 
 const MAX_GLOB_RESULTS = 100;
+const DEFAULT_HEAD_LIMIT = 100;
+const MAX_OUTPUT_CHARS = 30_000;
+const MAX_LINE_COLUMNS = 500;
 /** Lo que se lee de rg como mucho; más allá se mata el proceso y se avisa de que hay más. */
 const STDOUT_CAP = 2 * 1024 * 1024;
 
@@ -84,7 +87,7 @@ function rgFailure(r: RgResult, signal: AbortSignal): ToolOutput | null {
   if (signal.aborted) return { content: "[search interrupted by user]", isError: true };
   if (r.missing)
     return {
-      content: "ripgrep (rg) is not installed or not in PATH. Glob needs it; tell the user to install it.",
+      content: "ripgrep (rg) is not installed or not in PATH. Glob and Grep need it; tell the user to install it.",
       isError: true,
     };
   if (r.code === 2 && !r.stdout) return { content: r.stderr || "ripgrep failed", isError: true };
@@ -98,7 +101,7 @@ export const globTool = defineTool({
     "- The pattern is relative to `path` (default: the workspace root). A pattern without `/` matches at any depth. Paths outside the workspace are rejected.",
     "- Respects .gitignore and skips .git; other hidden files are included.",
     `- Returns up to ${MAX_GLOB_RESULTS} paths, most recently modified first.`,
-    "- Use it instead of `find` or `ls -R`.",
+    "- Use it instead of `find` or `ls -R`. To search file contents, use Grep.",
   ].join("\n"),
   schema: z.object({
     pattern: z.string().min(1).describe("Glob pattern, relative to path"),
@@ -125,5 +128,89 @@ export const globTool = defineTool({
     if (!files.length) return { content: ["No files found", ...notes].join("\n\n") };
     const shown = files.slice(0, MAX_GLOB_RESULTS).map((f) => displayPath(ctx.workspace, root.cwd, f));
     return { content: [shown.join("\n"), ...notes].join("\n\n") };
+  },
+});
+
+export const grepTool = defineTool({
+  name: "Grep",
+  description: [
+    "Searches file contents with a regular expression (ripgrep, Rust regex syntax: escape literal braces as `\\{`).",
+    "- Respects .gitignore and skips .git; other hidden files are included.",
+    "- Narrow with `glob` (e.g. `*.ts`, `src/**/*.tsx`) or `type` (ripgrep file type: ts, js, py, rust, go, java…).",
+    "- output_mode: `files_with_matches` (default; paths, most recently modified first), `content` (matching lines",
+    "  as path:line:text, with optional context lines) or `count` (matches per file).",
+    `- Returns the first ${DEFAULT_HEAD_LIMIT} entries by default; change it with head_limit.`,
+    "- Use it instead of grep/rg in Bash. To find files by name, use Glob.",
+  ].join("\n"),
+  schema: z.object({
+    pattern: z.string().min(1).describe("Regular expression to search for"),
+    path: z.string().optional().describe("File or directory to search in (default: workspace root)"),
+    glob: z.string().optional().describe("Only search files matching this glob"),
+    type: z.string().optional().describe("Only search files of this ripgrep type (ts, py, rust…)"),
+    output_mode: z.enum(["files_with_matches", "content", "count"]).optional().describe("Default: files_with_matches"),
+    case_insensitive: z.boolean().optional(),
+    context: z.number().int().min(0).max(20).optional().describe("Lines of context around each match (content mode)"),
+    multiline: z.boolean().optional().describe("Let the pattern span lines (`.` matches newlines)"),
+    head_limit: z.number().int().min(1).optional().describe(`Max entries to return (default ${DEFAULT_HEAD_LIMIT})`),
+  }),
+  readOnly: true,
+
+  async run(input, ctx) {
+    const root = await searchRoot(ctx.workspace, input.path);
+    if ("content" in root) return root;
+
+    const mode = input.output_mode ?? "files_with_matches";
+    const args = [...BASE_ARGS];
+    if (mode === "files_with_matches") args.push("--files-with-matches", "--sortr=modified");
+    else if (mode === "count") args.push("--count", "--with-filename", "--sort=path");
+    else {
+      args.push("--line-number", "--with-filename", "--no-heading", "--sort=path");
+      args.push(`--max-columns=${MAX_LINE_COLUMNS}`, "--max-columns-preview");
+      if (input.context) args.push(`--context=${input.context}`);
+    }
+    if (input.case_insensitive) args.push("--ignore-case");
+    if (input.multiline) args.push("--multiline", "--multiline-dotall");
+    const filter = nameFilter(input.glob, !!input.type);
+    args.push(...filter.args);
+    if (input.type) args.push(`--type=${input.type}`);
+    // --null: la ruta termina en NUL en lugar de `:`, así que rutas con `:` o `-` no se confunden con el número de línea.
+    args.push("--null", "--regexp", input.pattern, "--", root.arg ?? ".");
+
+    const r = await runRg(args, root.cwd, ctx.signal);
+    const failed = rgFailure(r, ctx.signal);
+    if (failed) return failed;
+
+    // En files_with_matches cada ruta acaba en NUL y no hay saltos de línea; en el resto, la ruta va hasta el NUL.
+    const all = r.stdout.split(mode === "files_with_matches" ? "\0" : "\n").filter(Boolean);
+    const pathOf = (l: string): string | null => (mode === "files_with_matches" ? l : l.includes("\0") ? l.slice(0, l.indexOf("\0")) : null);
+    const kept = all.filter((l) => {
+      const p = pathOf(l);
+      if (p === null) return true; // separador `--` entre bloques de contexto
+      if (!filter.matches(p)) return false;
+      return true;
+    });
+    // Sin separadores sueltos: al principio, al final o seguidos.
+    const lines = kept.filter((l, i) => l !== "--" || (i > 0 && i < kept.length - 1 && kept[i - 1] !== "--"));
+    if (!lines.some((l) => l !== "--")) return { content: ["No matches found"].join("\n\n") };
+
+    const rewrite = (l: string): string => {
+      if (mode === "files_with_matches") return displayPath(ctx.workspace, root.cwd, l);
+      const i = l.indexOf("\0");
+      if (i < 0) return l; // separador `--` entre bloques de contexto
+      const rest = l.slice(i + 1);
+      // count: path:N; content: path:N:texto (match) o path-N-texto (contexto).
+      const sep = mode === "count" || /^\d+:/.test(rest) ? ":" : "-";
+      return displayPath(ctx.workspace, root.cwd, l.slice(0, i)) + sep + rest;
+    };
+
+    const limit = input.head_limit ?? DEFAULT_HEAD_LIMIT;
+    const shown = lines.slice(0, limit).map(rewrite);
+    const notes: string[] = [];
+    if (lines.length > limit || r.capped) {
+      const total = r.capped ? `more than ${lines.length}` : String(lines.length);
+      notes.push(`[Showing ${limit} of ${total} ${mode === "content" ? "lines" : "files"}. Narrow the search or raise head_limit.]`);
+    }
+    if (r.code === 2 && r.stderr) notes.push(`[some files could not be searched: ${r.stderr.split("\n")[0]}]`);
+    return { content: truncateMiddle([shown.join("\n"), ...notes].join("\n\n"), MAX_OUTPUT_CHARS) };
   },
 });

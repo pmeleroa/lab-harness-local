@@ -4,7 +4,7 @@ import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { readTool } from "../src/tools/read.js";
-import { globTool } from "../src/tools/search.js";
+import { globTool, grepTool } from "../src/tools/search.js";
 import { FileStateCache } from "../src/tools/file-state.js";
 import { editTool } from "../src/tools/edit.js";
 import { writeTool } from "../src/tools/write.js";
@@ -81,6 +81,46 @@ describe("Glob", () => {
       expect(r.isError, p).toBe(true);
       expect(r.content).not.toContain("token.txt");
     }
+  });
+});
+
+describe("Grep", () => {
+  it("encuentra el patrón y devuelve la ruta relativa", async () => {
+    const r = await grepTool.run({ pattern: "export const b" }, ctx());
+    expect(r.isError).toBeUndefined();
+    expect(r.content.trim()).toBe(path.join("src", "a.ts"));
+  });
+
+  it("en modo content devuelve ruta:línea:texto", async () => {
+    const r = await grepTool.run({ pattern: "const b", output_mode: "content" }, ctx());
+    expect(r.content).toContain("src/a.ts:2:export const b = 2;");
+  });
+
+  it("el glob de ficheros limita dónde se busca", async () => {
+    const md = await grepTool.run({ pattern: "notas", glob: "*.md" }, ctx());
+    expect(md.content.trim()).toBe("notes.md");
+    const ts = await grepTool.run({ pattern: "notas", glob: "*.ts" }, ctx());
+    expect(ts.content).toContain("No matches found");
+  });
+
+  it("sin coincidencias no es un error", async () => {
+    const r = await grepTool.run({ pattern: "no-existe-en-ningun-sitio" }, ctx());
+    expect(r.isError).toBeUndefined();
+    expect(r.content).toContain("No matches found");
+  });
+
+  it("rechaza una ruta fuera del workspace", async () => {
+    const r = await grepTool.run({ pattern: "TOP-SECRET", path: outside }, ctx());
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("outside the workspace");
+    expect(r.content).not.toContain("TOP-SECRET");
+  });
+
+  it("no sigue un enlace simbólico que sale del workspace", async () => {
+    const r = await grepTool.run({ pattern: "TOP-SECRET", path: "link-out" }, ctx());
+    expect(r.isError).toBe(true);
+    const all = await grepTool.run({ pattern: "TOP-SECRET", output_mode: "content" }, ctx());
+    expect(all.content).not.toContain("TOP-SECRET");
   });
 });
 
