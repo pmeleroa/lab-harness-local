@@ -11,9 +11,10 @@ export const readTool = defineTool({
   name: "Read",
   description: [
     "Reads a text file from the filesystem.",
-    "- file_path is relative to the workspace root. Paths outside the workspace need the user to approve them.",
+    "- file_path can be absolute or relative to the workspace root.",
     `- Returns up to ${DEFAULT_LIMIT} lines by default; use offset/limit (1-based) to page through large files.`,
     "- Output uses `cat -n` format: line number, a tab, then the line.",
+    "- You must Read a file before you Edit or overwrite it.",
     `- Lines longer than ${MAX_LINE_CHARS} characters are truncated.`,
   ].join("\n"),
   schema: z.object({
