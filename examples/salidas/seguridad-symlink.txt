@@ -8,7 +8,7 @@ modo: default
 
 ctx 1,2k/4,1k (30%)
 x Read denegado: read outside workspace: /private/tmp/fuera/nota.txt (sin terminal para preguntar)
-Se ha denegado la acción de leer el archivo `datos/nota.txt`. No se puede acceder al archivo sin la interacción del usuario. ¿Cómo deseas proceder?
+No se puede leer el archivo `datos/nota.txt` ya que no hay una interacción interactiva disponible. ¿Podrías acceder al archivo y compartir su contenido manualmente o proporcionar permiso para realizar esta acción?
 ctx 1,3k/4,1k (32%)
 
-[end_turn] 2 turnos, 1 llamadas, 75 tokens de entrada, 62 de salida
+[end_turn] 2 turnos, 1 llamadas, 75 tokens de entrada, 72 de salida
