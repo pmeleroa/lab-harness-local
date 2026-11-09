@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { z } from "zod";
 import { hashContent } from "./file-state.js";
-import { defineTool, resolveInWorkspace } from "./types.js";
+import { defineTool, resolveReal } from "./types.js";
 
 const DEFAULT_LIMIT = 2000;
 const MAX_LINE_CHARS = 2000;
@@ -11,7 +11,7 @@ export const readTool = defineTool({
   name: "Read",
   description: [
     "Reads a text file from the filesystem.",
-    "- file_path is relative to the workspace root. Paths outside the workspace are rejected.",
+    "- file_path is relative to the workspace root. Paths outside the workspace need the user to approve them.",
     `- Returns up to ${DEFAULT_LIMIT} lines by default; use offset/limit (1-based) to page through large files.`,
     "- Output uses `cat -n` format: line number, a tab, then the line.",
     `- Lines longer than ${MAX_LINE_CHARS} characters are truncated.`,
@@ -22,11 +22,10 @@ export const readTool = defineTool({
     limit: z.number().int().min(1).optional().describe("Number of lines to read"),
   }),
   readOnly: true,
+  permissionTarget: (input, ctx) => ({ kind: "path", path: resolveReal(ctx.workspace, input.file_path), access: "read" }),
 
   async run(input, ctx) {
-    const resolved = await resolveInWorkspace(ctx.workspace, input.file_path);
-    if (!resolved.ok) return resolved.error;
-    const p = resolved.path;
+    const p = resolveReal(ctx.workspace, input.file_path);
     const st = await stat(p).catch(() => null);
     if (!st) return { content: `File does not exist: ${p}`, isError: true };
     if (st.isDirectory()) return { content: `${p} is a directory, not a file.`, isError: true };

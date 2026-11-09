@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -9,6 +9,8 @@ export interface ToolCtx {
   /** Raíz del workspace: límite de lectura y base de rutas relativas. */
   workspace: string;
   signal: AbortSignal;
+  /** Si una búsqueda (Glob, Grep) puede incluir este fichero: quita lo que una regla de lectura más concreta deniega. */
+  searchable?: (absPath: string) => boolean;
   /** Qué ficheros ha leído el modelo y en qué estado: lo usan Edit y Write. */
   fileState: FileStateCache;
   /** Id del tool_use que se está ejecutando. */
@@ -20,6 +22,13 @@ export interface ToolOutput {
   isError?: boolean;
 }
 
+/** Lo que el motor de permisos necesita saber de una llamada: qué ruta real toca y si lee o escribe. */
+export interface PermissionTarget {
+  kind: "path";
+  path: string;
+  access: "read" | "write";
+}
+
 export interface Tool<S extends z.ZodType = z.ZodType> {
   name: string;
   /** El texto que lee el modelo. Aquí se gana o se pierde calidad. */
@@ -27,6 +36,7 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
   schema: S;
   /** true => se puede ejecutar en paralelo con otras readOnly. */
   readOnly: boolean | ((input: z.infer<S>) => boolean);
+  permissionTarget(input: z.infer<S>, ctx: Pick<ToolCtx, "workspace">): PermissionTarget;
   run(input: z.infer<S>, ctx: ToolCtx): Promise<ToolOutput>;
 }
 
@@ -49,20 +59,24 @@ export function isInside(root: string, p: string): boolean {
 }
 
 /**
- * Límite de workspace. Resuelve la ruta y, si existe, sus enlaces simbólicos con `realpath`: un enlace dentro del
- * workspace que apunta fuera se rechaza. El error vuelve al modelo como resultado de la herramienta.
- * No es el modelo de permisos del agente: es el mínimo para que una herramienta de solo lectura no salga de aquí.
+ * Ruta real de `p`: resuelve los enlaces simbólicos con `realpath`. Si la ruta aún no existe (un `Write` nuevo), se
+ * resuelve el ancestro más profundo que sí existe y se le añade el resto: un directorio que es un enlace hacia fuera
+ * se detecta igual. No rechaza nada: decidir si se puede tocar es cosa del motor de permisos, que recibe esta ruta.
  */
-export async function resolveInWorkspace(
-  workspace: string,
-  p: string,
-): Promise<{ ok: true; path: string } | { ok: false; error: ToolOutput }> {
+export function resolveReal(workspace: string, p: string): string {
   const abs = resolvePath(workspace, p);
-  const root = await realpath(workspace);
-  const real = await realpath(abs).catch(() => null);
-  const inside = real ? isInside(root, real) : isInside(root, abs) || isInside(workspace, abs);
-  if (!inside) return { ok: false, error: { content: `Path is outside the workspace: ${p}`, isError: true } };
-  return { ok: true, path: real ?? abs };
+  const rest: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try {
+      return path.join(realpathSync(cur), ...rest.reverse());
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return abs;
+      rest.push(path.basename(cur));
+      cur = parent;
+    }
+  }
 }
 
 /** Recorta salidas largas conservando cabeza y cola, que es donde suele estar la señal. */

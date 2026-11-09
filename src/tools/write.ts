@@ -2,7 +2,7 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { hashContent } from "./file-state.js";
-import { defineTool, resolveInWorkspace } from "./types.js";
+import { defineTool, resolveReal } from "./types.js";
 
 export const writeTool = defineTool({
   name: "Write",
@@ -17,11 +17,10 @@ export const writeTool = defineTool({
     content: z.string().describe("Full file content"),
   }),
   readOnly: false,
+  permissionTarget: (input, ctx) => ({ kind: "path", path: resolveReal(ctx.workspace, input.file_path), access: "write" }),
 
   async run(input, ctx) {
-    const resolved = await resolveInWorkspace(ctx.workspace, input.file_path);
-    if (!resolved.ok) return resolved.error;
-    const p = resolved.path;
+    const p = resolveReal(ctx.workspace, input.file_path);
     const existing = await stat(p).catch(() => null);
     if (existing?.isDirectory()) return { content: `${p} is a directory.`, isError: true };
     if (existing) {

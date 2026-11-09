@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { type ToolOutput, defineTool, isInside, resolveInWorkspace, truncateMiddle } from "./types.js";
+import { type ToolOutput, defineTool, isInside, resolveReal, truncateMiddle } from "./types.js";
 
 const MAX_GLOB_RESULTS = 100;
 const DEFAULT_HEAD_LIMIT = 100;
@@ -55,9 +55,7 @@ function runRg(args: string[], cwd: string, signal: AbortSignal): Promise<RgResu
  * desde el directorio buscado. Si es un fichero, desde su directorio y con el fichero como argumento.
  */
 async function searchRoot(workspace: string, p: string | undefined): Promise<{ cwd: string; arg?: string } | ToolOutput> {
-  const resolved = await resolveInWorkspace(workspace, p ?? ".");
-  if (!resolved.ok) return resolved.error;
-  const abs = resolved.path;
+  const abs = resolveReal(workspace, p ?? ".");
   const st = await stat(abs).catch(() => null);
   if (!st) return { content: `Path does not exist: ${abs}`, isError: true };
   return st.isDirectory() ? { cwd: abs } : { cwd: path.dirname(abs), arg: path.basename(abs) };
@@ -83,6 +81,8 @@ function nameFilter(glob: string | undefined, otherType: boolean): { args: strin
   return { args, matches: (rel) => path.matchesGlob(anyDepth ? path.basename(rel) : rel.replace(/^\.\//, ""), glob) };
 }
 
+const excludedNote = (n: number) => (n ? [`[${n} file${n === 1 ? "" : "s"} excluded by permission rules]`] : []);
+
 function rgFailure(r: RgResult, signal: AbortSignal): ToolOutput | null {
   if (signal.aborted) return { content: "[search interrupted by user]", isError: true };
   if (r.missing)
@@ -98,7 +98,7 @@ export const globTool = defineTool({
   name: "Glob",
   description: [
     "Finds files by name with a glob pattern (e.g. `**/*.ts`, `src/**/*.test.ts`, `*.md`).",
-    "- The pattern is relative to `path` (default: the workspace root). A pattern without `/` matches at any depth. Paths outside the workspace are rejected.",
+    "- The pattern is relative to `path` (default: the workspace root). A pattern without `/` matches at any depth.",
     "- Respects .gitignore and skips .git; other hidden files are included.",
     `- Returns up to ${MAX_GLOB_RESULTS} paths, most recently modified first.`,
     "- Use it instead of `find` or `ls -R`. To search file contents, use Grep.",
@@ -108,6 +108,7 @@ export const globTool = defineTool({
     path: z.string().optional().describe("Directory to search in (default: workspace root)"),
   }),
   readOnly: true,
+  permissionTarget: (input, ctx) => ({ kind: "path", path: resolveReal(ctx.workspace, input.path ?? "."), access: "read" }),
 
   async run(input, ctx) {
     const root = await searchRoot(ctx.workspace, input.path);
@@ -120,8 +121,8 @@ export const globTool = defineTool({
     if (failed) return failed;
 
     const named = r.stdout.split("\n").filter((f) => f && filter.matches(f));
-    const files = named;
-    const notes: string[] = [];
+    const files = named.filter((f) => ctx.searchable?.(path.resolve(root.cwd, f)) ?? true);
+    const notes = excludedNote(named.length - files.length);
     if (files.length > MAX_GLOB_RESULTS)
       notes.push(`[Showing ${MAX_GLOB_RESULTS} of ${files.length} files. Use a more specific pattern or path.]`);
     if (r.capped) notes.push("[Too many files under this path: only the most recently modified were checked. Narrow path.]");
@@ -154,6 +155,7 @@ export const grepTool = defineTool({
     head_limit: z.number().int().min(1).optional().describe(`Max entries to return (default ${DEFAULT_HEAD_LIMIT})`),
   }),
   readOnly: true,
+  permissionTarget: (input, ctx) => ({ kind: "path", path: resolveReal(ctx.workspace, input.path ?? "."), access: "read" }),
 
   async run(input, ctx) {
     const root = await searchRoot(ctx.workspace, input.path);
@@ -183,15 +185,20 @@ export const grepTool = defineTool({
     // En files_with_matches cada ruta acaba en NUL y no hay saltos de línea; en el resto, la ruta va hasta el NUL.
     const all = r.stdout.split(mode === "files_with_matches" ? "\0" : "\n").filter(Boolean);
     const pathOf = (l: string): string | null => (mode === "files_with_matches" ? l : l.includes("\0") ? l.slice(0, l.indexOf("\0")) : null);
+    const excluded = new Set<string>();
     const kept = all.filter((l) => {
       const p = pathOf(l);
       if (p === null) return true; // separador `--` entre bloques de contexto
       if (!filter.matches(p)) return false;
+      if (ctx.searchable && !ctx.searchable(path.resolve(root.cwd, p))) {
+        excluded.add(p);
+        return false;
+      }
       return true;
     });
     // Sin separadores sueltos: al principio, al final o seguidos.
     const lines = kept.filter((l, i) => l !== "--" || (i > 0 && i < kept.length - 1 && kept[i - 1] !== "--"));
-    if (!lines.some((l) => l !== "--")) return { content: ["No matches found"].join("\n\n") };
+    if (!lines.some((l) => l !== "--")) return { content: ["No matches found", ...excludedNote(excluded.size)].join("\n\n") };
 
     const rewrite = (l: string): string => {
       if (mode === "files_with_matches") return displayPath(ctx.workspace, root.cwd, l);
@@ -205,7 +212,7 @@ export const grepTool = defineTool({
 
     const limit = input.head_limit ?? DEFAULT_HEAD_LIMIT;
     const shown = lines.slice(0, limit).map(rewrite);
-    const notes: string[] = [];
+    const notes = excludedNote(excluded.size);
     if (lines.length > limit || r.capped) {
       const total = r.capped ? `more than ${lines.length}` : String(lines.length);
       notes.push(`[Showing ${limit} of ${total} ${mode === "content" ? "lines" : "files"}. Narrow the search or raise head_limit.]`);

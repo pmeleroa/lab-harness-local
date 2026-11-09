@@ -24,6 +24,7 @@ import {
   summaryMessage,
 } from "../context/manager.js";
 import { OVERFLOW_MIN_GROWTH_COMPACT, type RequestSample, looksTruncated } from "../context/overflow.js";
+import type { PolicyEngine } from "../policy/engine.js";
 import { FileStateCache } from "../tools/file-state.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { AgentEvent, AgentState, EventBus, RunEndReason } from "./events.js";
@@ -51,12 +52,41 @@ export const defaultAgentConfig = (model: string): AgentConfig => ({
   context: defaultContextPolicy,
 });
 
+export type ApprovalAnswer =
+  | { kind: "allow_once" }
+  | { kind: "allow_always"; rule: string }
+  | { kind: "deny"; feedback?: string };
+
+export interface ApprovalRequest {
+  call: ToolUseBlock;
+  reason: string;
+  suggestedRule: string | null;
+}
+
+export type Approver = (req: ApprovalRequest) => Promise<ApprovalAnswer>;
+
+/** Sin terminal (CI, `< /dev/null`): todo lo que requiera confirmación se deniega. Fallar cerrado. */
+export const denyAllApprover: Approver = async () => ({ kind: "deny", feedback: "No interactive user available." });
+
+/** Un solo prompt de permiso a la vez, aunque las herramientas de lectura corran en paralelo. */
+class ApprovalLock {
+  private tail: Promise<unknown> = Promise.resolve();
+
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.tail.then(fn);
+    this.tail = next.catch(() => undefined);
+    return next;
+  }
+}
+
 export interface AgentDeps {
   provider: Provider;
   registry: ToolRegistry;
   bus: EventBus;
   system: SystemPart[];
   workspace: string;
+  policy: PolicyEngine;
+  approver: Approver;
 }
 
 export interface RunResult {
@@ -85,6 +115,7 @@ export class Agent {
 
   /** Lo que el modelo ha leído en este run: Edit y Write lo exigen antes de modificar un fichero. */
   private fileState = new FileStateCache();
+  private approvalLock = new ApprovalLock();
 
   constructor(
     private deps: AgentDeps,
@@ -371,11 +402,40 @@ export class Agent {
     if (!parsed.ok) return result(parsed.error, true);
     const { tool, input } = parsed;
 
+    // Permisos: el motor decide sobre la ruta real; `ask` pasa por el approver.
+    const target = tool.permissionTarget(input, { workspace: this.deps.workspace });
+    const decision = this.deps.policy.evaluate(call, target);
+    let source: "policy" | "user" = "policy";
+    let allowed = decision.kind === "allow";
+    let denyMessage = `Permission denied: ${decision.reason}.`;
+    if (decision.kind === "ask") {
+      source = "user";
+      const answer = await this.approvalLock.run(() => {
+        this.emit({ t: "permission_request", call, reason: decision.reason });
+        return this.deps.approver({ call, reason: decision.reason, suggestedRule: this.deps.policy.suggestRule(call, target) });
+      });
+      if (signal.aborted) return result(INTERRUPTED, true);
+      allowed = answer.kind !== "deny";
+      if (answer.kind === "allow_always") this.deps.policy.addSessionRule("allow", answer.rule);
+      if (answer.kind === "deny")
+        denyMessage = `The user denied this action${answer.feedback ? `: ${answer.feedback}` : "."} Do not retry it with another tool; ask the user how to proceed if needed.`;
+    }
+    this.emit({ t: "permission_decision", call, decision: allowed ? "allow" : "deny", source });
+    if (!allowed) return result(denyMessage, true);
+
     this.emit({ t: "tool_start", call });
     const t0 = Date.now();
     let out: ToolResultBlock;
     try {
-      const r = await tool.run(input, { workspace: this.deps.workspace, signal, fileState: this.fileState, callId: call.id });
+      const searchable =
+        target.access === "read" ? (p: string) => !this.deps.policy.hidesFromSearch(call.name, p, target.path) : undefined;
+      const r = await tool.run(input, {
+        workspace: this.deps.workspace,
+        signal,
+        fileState: this.fileState,
+        callId: call.id,
+        ...(searchable ? { searchable } : {}),
+      });
       out = result(capToolResult(r.content, this.toolResultCap), !!r.isError);
     } catch (e) {
       out = result(`Tool ${call.name} failed: ${errorMessage(e)}`, true);

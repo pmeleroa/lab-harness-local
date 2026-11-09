@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlink
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import { PolicyEngine, type PermissionMode, type RuleSet } from "../src/policy/engine.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { readTool } from "../src/tools/read.js";
 import { globTool, grepTool } from "../src/tools/search.js";
@@ -11,6 +12,13 @@ import { writeTool } from "../src/tools/write.js";
 
 let workspace: string;
 let outside: string;
+
+/** Lo que decide el motor para una llamada: las herramientas ya no rechazan, declaran qué ruta real tocan. */
+function decide(tool: { name: string; permissionTarget: (i: never, c: { workspace: string }) => import("../src/tools/types.js").PermissionTarget }, input: unknown, o: { mode?: PermissionMode; rules?: Partial<RuleSet> } = {}) {
+  const engine = new PolicyEngine({ workspace, mode: o.mode ?? "default", rules: { allow: [], ask: [], deny: [], ...o.rules } });
+  const target = tool.permissionTarget(input as never, { workspace });
+  return { target, decision: engine.evaluate({ type: "tool_use", id: "x", name: tool.name, input }, target) };
+}
 const ctx = (fileState = new FileStateCache()) => ({ workspace, signal: new AbortController().signal, fileState });
 
 beforeAll(() => {
@@ -33,32 +41,37 @@ describe("Read", () => {
     expect(r.content).toContain("1\texport const a = 1;");
   });
 
-  it("rechaza ../", async () => {
-    const r = await readTool.run({ file_path: "../secret/token.txt" }, ctx());
-    expect(r.isError).toBe(true);
-    expect(r.content).toContain("outside the workspace");
-    expect(r.content).not.toContain("TOP-SECRET");
+  it("../ sale del workspace: el motor pregunta", () => {
+    const { decision } = decide(readTool, { file_path: "../secret/token.txt" });
+    expect(decision.kind).toBe("ask");
+    expect(decision.reason).toContain("read outside workspace");
   });
 
-  it("rechaza una ruta absoluta externa", async () => {
-    const r = await readTool.run({ file_path: path.join(outside, "token.txt") }, ctx());
-    expect(r.isError).toBe(true);
-    expect(r.content).not.toContain("TOP-SECRET");
+  it("una ruta absoluta externa: el motor pregunta", () => {
+    expect(decide(readTool, { file_path: path.join(outside, "token.txt") }).decision.kind).toBe("ask");
   });
 
-  it("rechaza ~ (fuera del workspace)", async () => {
-    const r = await readTool.run({ file_path: "~/.ssh/id_rsa" }, ctx());
-    expect(r.isError).toBe(true);
-    expect(r.content).toContain("outside the workspace");
+  it("~ queda fuera del workspace: el motor pregunta", () => {
+    expect(decide(readTool, { file_path: "~/.ssh/id_rsa" }).decision.kind).toBe("ask");
   });
 
-  it("rechaza un enlace simbólico que sale del workspace", async () => {
-    const r = await readTool.run({ file_path: "token-link.txt" }, ctx());
-    expect(r.isError).toBe(true);
-    expect(r.content).not.toContain("TOP-SECRET");
-    const viaDir = await readTool.run({ file_path: "link-out/token.txt" }, ctx());
-    expect(viaDir.isError).toBe(true);
-    expect(viaDir.content).not.toContain("TOP-SECRET");
+  it("un enlace simbólico que sale del workspace se evalúa por su ruta real", () => {
+    const file = decide(readTool, { file_path: "token-link.txt" });
+    expect(file.target.path).toBe(path.join(outside, "token.txt"));
+    expect(file.decision.kind).toBe("ask");
+    const viaDir = decide(readTool, { file_path: "link-out/token.txt" });
+    expect(viaDir.target.path).toBe(path.join(outside, "token.txt"));
+    expect(viaDir.decision.kind).toBe("ask");
+  });
+
+  it("un deny sobre la ruta real gana aunque se llegue por un enlace dentro del workspace", () => {
+    const rules = { deny: [`Read(${outside}/**)`] };
+    expect(decide(readTool, { file_path: "token-link.txt" }, { rules }).decision.kind).toBe("deny");
+    expect(decide(readTool, { file_path: "link-out/token.txt" }, { rules, mode: "bypass" }).decision.kind).toBe("deny");
+  });
+
+  it("una lectura dentro del workspace se permite", () => {
+    expect(decide(readTool, { file_path: "src/a.ts" }).decision.kind).toBe("allow");
   });
 
   it("un fichero inexistente dentro del workspace es un error normal", async () => {
@@ -75,12 +88,12 @@ describe("Glob", () => {
     expect(r.content).toContain("src/a.ts");
   });
 
-  it("rechaza un path fuera del workspace", async () => {
-    for (const p of ["..", outside, "link-out"]) {
-      const r = await globTool.run({ pattern: "*", path: p }, ctx());
-      expect(r.isError, p).toBe(true);
-      expect(r.content).not.toContain("token.txt");
-    }
+  it("un path fuera del workspace: el motor pregunta", () => {
+    expect(decide(globTool, { pattern: "*", path: outside }).decision.kind).toBe("ask");
+  });
+
+  it("fuera del workspace, por ../, ruta absoluta o enlace, el motor pregunta", () => {
+    for (const p of ["..", outside, "link-out"]) expect(decide(globTool, { pattern: "*", path: p }).decision.kind, p).toBe("ask");
   });
 });
 
@@ -109,18 +122,22 @@ describe("Grep", () => {
     expect(r.content).toContain("No matches found");
   });
 
-  it("rechaza una ruta fuera del workspace", async () => {
-    const r = await grepTool.run({ pattern: "TOP-SECRET", path: outside }, ctx());
-    expect(r.isError).toBe(true);
-    expect(r.content).toContain("outside the workspace");
-    expect(r.content).not.toContain("TOP-SECRET");
+  it("una ruta fuera del workspace: el motor pregunta", () => {
+    expect(decide(grepTool, { pattern: "TOP-SECRET", path: outside }).decision.kind).toBe("ask");
+    expect(decide(grepTool, { pattern: "TOP-SECRET", path: "link-out" }).decision.kind).toBe("ask");
   });
 
-  it("no sigue un enlace simbólico que sale del workspace", async () => {
-    const r = await grepTool.run({ pattern: "TOP-SECRET", path: "link-out" }, ctx());
-    expect(r.isError).toBe(true);
+  it("una búsqueda sobre el workspace no entra en un enlace que sale de él", async () => {
     const all = await grepTool.run({ pattern: "TOP-SECRET", output_mode: "content" }, ctx());
     expect(all.content).not.toContain("TOP-SECRET");
+  });
+
+  it("`searchable` quita de los resultados lo que una regla de lectura deniega", async () => {
+    const engine = new PolicyEngine({ workspace, mode: "default", rules: { allow: [], ask: [], deny: ["Read(**/a.ts)"] } });
+    const searchable = (p: string) => !engine.hidesFromSearch("Grep", p, workspace);
+    const r = await grepTool.run({ pattern: "export const" }, { ...ctx(), searchable });
+    expect(r.content).toContain("No matches found");
+    expect(r.content).toContain("1 file excluded by permission rules");
   });
 });
 
@@ -242,9 +259,39 @@ describe("Edit y Write: read-before-edit", () => {
     expect(ok.content).toContain("Overwrote");
   });
 
-  it("sin motor de permisos, Write y Edit no salen del workspace", async () => {
-    const w = await writeTool.run({ file_path: "../fuera.txt", content: "x" }, ctx());
-    expect(w.isError).toBe(true);
-    expect(existsSync(path.join(path.dirname(workspace), "fuera.txt"))).toBe(false);
+  it("escribir fuera del workspace pregunta, también por un enlace simbólico", () => {
+    expect(decide(writeTool, { file_path: "../fuera.txt", content: "x" }).decision.reason).toContain("write outside workspace");
+    expect(decide(writeTool, { file_path: "link-out/nuevo.txt", content: "x" }).target.path).toBe(path.join(outside, "nuevo.txt"));
+    expect(decide(editTool, { file_path: "token-link.txt", old_string: "a", new_string: "b" }).decision.kind).toBe("ask");
+  });
+
+  it("escribir dentro del workspace: pregunta en default y se permite en acceptEdits y bypass", () => {
+    const input = { file_path: "src/a.ts", old_string: "a", new_string: "b" };
+    expect(decide(editTool, input).decision.kind).toBe("ask");
+    expect(decide(editTool, input, { mode: "acceptEdits" }).decision.kind).toBe("allow");
+    expect(decide(editTool, input, { mode: "bypass" }).decision.kind).toBe("allow");
+  });
+
+  it("un deny gana en cualquier modo y Edit(...) cubre también a Write", () => {
+    const rules = { deny: ["Edit(**/.env*)"] };
+    for (const mode of ["default", "acceptEdits", "bypass"] as const) {
+      expect(decide(editTool, { file_path: ".env", old_string: "a", new_string: "b" }, { mode, rules }).decision.kind, mode).toBe("deny");
+      expect(decide(writeTool, { file_path: "sub/.env.local", content: "x" }, { mode, rules }).decision.kind, mode).toBe("deny");
+    }
+  });
+
+  it("deny > ask > allow, y una regla allow no levanta un deny", () => {
+    const rules = { allow: ["Edit(src/**)"], ask: ["Edit(src/**)"], deny: ["Edit(src/a.ts)"] };
+    expect(decide(editTool, { file_path: "src/a.ts", old_string: "a", new_string: "b" }, { rules }).decision.kind).toBe("deny");
+    expect(decide(editTool, { file_path: "src/b.ts", old_string: "a", new_string: "b" }, { rules, mode: "acceptEdits" }).decision.kind).toBe("ask");
+  });
+
+  it("una regla de sesión («siempre») evita volver a preguntar", () => {
+    const engine = new PolicyEngine({ workspace, mode: "default", rules: { allow: [], ask: [], deny: [] } });
+    const target = editTool.permissionTarget({ file_path: "src/a.ts", old_string: "a", new_string: "b" }, { workspace });
+    const call = { type: "tool_use" as const, id: "x", name: "Edit", input: {} };
+    expect(engine.evaluate(call, target).kind).toBe("ask");
+    engine.addSessionRule("allow", "Edit(src/**)");
+    expect(engine.evaluate(call, target).kind).toBe("allow");
   });
 });

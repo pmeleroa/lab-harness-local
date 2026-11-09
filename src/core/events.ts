@@ -10,6 +10,10 @@ export type AgentEvent =
   | { t: "state"; state: AgentState }
   | { t: "text_delta"; text: string }
   | { t: "tool_start"; call: ToolUseBlock }
+  /** El motor decidió `ask` y se le pregunta al usuario. */
+  | { t: "permission_request"; call: ToolUseBlock; reason: string }
+  /** Resultado final de los permisos para esta llamada; `source` dice quién decidió. */
+  | { t: "permission_decision"; call: ToolUseBlock; decision: "allow" | "deny"; source: "policy" | "user" }
   | { t: "tool_end"; call: ToolUseBlock; result: ToolResultBlock; durationMs: number }
   /** `truncated`: el servidor recortó la conversación; su uso no sirve para calibrar el contexto. */
   | { t: "turn_end"; turn: number; usage: Usage; truncated?: boolean }

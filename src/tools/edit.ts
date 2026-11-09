@@ -1,7 +1,7 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import { hashContent } from "./file-state.js";
-import { defineTool, resolveInWorkspace } from "./types.js";
+import { defineTool, resolveReal } from "./types.js";
 
 const CONTEXT_LINES = 4;
 
@@ -22,11 +22,10 @@ export const editTool = defineTool({
     replace_all: z.boolean().optional().describe("Replace every occurrence (default false)"),
   }),
   readOnly: false,
+  permissionTarget: (input, ctx) => ({ kind: "path", path: resolveReal(ctx.workspace, input.file_path), access: "write" }),
 
   async run(input, ctx) {
-    const resolved = await resolveInWorkspace(ctx.workspace, input.file_path);
-    if (!resolved.ok) return resolved.error;
-    const p = resolved.path;
+    const p = resolveReal(ctx.workspace, input.file_path);
     if (input.old_string === input.new_string)
       return { content: "old_string and new_string are identical; nothing to change.", isError: true };
 

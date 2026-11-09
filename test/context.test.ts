@@ -189,14 +189,14 @@ describe("final: context_overflow", () => {
         if (isSummaryRequest(req)) return { content: [text("<summary>Leídos a y b.</summary>")] };
         return turn <= 2 ? { content: [use(`t${turn}`, "Read", { file_path: dir[turn - 1]! })] } : { content: [text("hecho")] };
       },
-      { files: { "a.txt": bigFile(1_000), "b.txt": bigFile(1_000) }, config: { contextWindow: 100_000 }, truncate: { window: 2_650 } },
+      { files: { "a.txt": bigFile(1_000), "b.txt": bigFile(1_000) }, config: { contextWindow: 100_000 }, truncate: { window: 3_400 } },
     );
     expect((await s.agent.run("lee a y b")).reason).toBe("end_turn");
     const before = JSON.stringify(s.agent.messages);
     const lastNormal = estimateRequest(s.provider.requests.at(-1)!);
     await expect(s.agent.compact()).rejects.toThrow(/truncated the compaction request/);
-    expect(lastNormal).toBeLessThanOrEqual(2_650);
-    expect(estimateRequest(s.provider.requests.at(-1)!)).toBeGreaterThan(2_650);
+    expect(lastNormal).toBeLessThanOrEqual(3_400);
+    expect(estimateRequest(s.provider.requests.at(-1)!)).toBeGreaterThan(3_400);
     expect(JSON.stringify(s.agent.messages)).toBe(before);
   });
 });
