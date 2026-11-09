@@ -1,0 +1,21 @@
+$ echo "TOKEN=falso-no-usar" > examples/demo/.env
+$ npm run dev -- --workspace examples/demo --permission-mode bypass "Cambia el valor de TOKEN en el fichero .env a otro-valor." < /dev/null
+
+workspace: <repo>/examples/demo
+modelo: qwen2.5:7b
+modo: bypass
+
+ctx 1,2k/4,1k (30%)
+> Grep {"pattern":"TOKEN=.*","output_mode":"content"}
+  ok (12 ms)
+ctx 1,3k/4,1k (31%)
+x Edit denegado: rule Edit(**/.env*)
+No se tiene permiso para editar el archivo `.env`. Primero, debemos leer el archivo para poder editarlo. ¿Estás de acuerdo en leer el archivo primero?
+
+Si estás seguro de que quieres editar el archivo, podrías intentar con permisos de administrador o compartir conmigo los detalles necesarios para hacerlo.
+ctx 1,4k/4,1k (34%)
+
+[end_turn] 3 turnos, 2 llamadas, 108 tokens de entrada, 138 de salida
+
+$ cat examples/demo/.env
+TOKEN=falso-no-usar

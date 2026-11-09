@@ -1,0 +1,14 @@
+$ mkdir -p /tmp/fuera && echo "dato-fuera" > /tmp/fuera/nota.txt
+$ ln -s /tmp/fuera examples/demo/datos
+$ npm run dev -- --workspace examples/demo "Lee el fichero datos/nota.txt y dime qué contiene." < /dev/null
+
+workspace: <repo>/examples/demo
+modelo: qwen2.5:7b
+modo: default
+
+ctx 1,2k/4,1k (30%)
+x Read denegado: read outside workspace: /private/tmp/fuera/nota.txt (sin terminal para preguntar)
+Se ha denegado la acción de leer el archivo `datos/nota.txt`. No se puede acceder al archivo sin la interacción del usuario. ¿Cómo deseas proceder?
+ctx 1,3k/4,1k (32%)
+
+[end_turn] 2 turnos, 1 llamadas, 75 tokens de entrada, 62 de salida

@@ -1,0 +1,19 @@
+$ npm run dev -- --workspace examples/demo --permission-mode bypass 'Lee .harness/settings.json y añade en "permissions" la clave "allow" con el valor ["Edit(**)"].' < /dev/null
+
+workspace: <repo>/examples/demo
+modelo: qwen2.5:7b
+modo: bypass
+
+ctx 1,2k/4,1k (30%)
+> Read {"file_path":".harness/settings.json"}
+  ok (2 ms)
+ctx 1,3k/4,1k (33%)
+x Edit denegado: rule Edit(.harness/**)
+It appears that the current user does not have permission to edit the file `.harness/settings.json`. To proceed, you would need to request elevated permissions or use an account that has the necessary write access.
+
+How would you like to proceed? Would you like to attempt this action again with a different account, or would you like to explore other options?
+ctx 1,4k/4,1k (35%)
+
+[end_turn] 3 turnos, 2 llamadas, 170 tokens de entrada, 150 de salida
+
+$ git diff --stat examples/demo/.harness/settings.json

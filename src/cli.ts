@@ -106,8 +106,10 @@ bus.on((e: AgentEvent) => {
   }
   const line =
     e.t === "permission_decision"
-      ? e.decision === "deny" && e.source === "policy"
-        ? `x ${e.call.name} denegado: ${e.reason}`
+      ? // Una regla que deniega se ve siempre. Un `ask` que se convierte en `deny` solo cuando no había nadie a quien
+        // preguntar: con terminal, el usuario ya vio el prompt.
+        e.decision === "deny" && (e.source === "policy" || !canAsk)
+        ? `x ${e.call.name} denegado: ${e.reason}${e.source === "user" ? " (sin terminal para preguntar)" : ""}`
         : null
       : e.t === "tool_start"
       ? `> ${e.call.name} ${short(e.call.input)}`
