@@ -3,11 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { ToolSpec } from "../providers/canonical.js";
+import type { FileStateCache } from "./file-state.js";
 
 export interface ToolCtx {
   /** Raíz del workspace: límite de lectura y base de rutas relativas. */
   workspace: string;
   signal: AbortSignal;
+  /** Qué ficheros ha leído el modelo y en qué estado: lo usan Edit y Write. */
+  fileState: FileStateCache;
   /** Id del tool_use que se está ejecutando. */
   callId?: string;
 }

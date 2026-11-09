@@ -1,5 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { z } from "zod";
+import { hashContent } from "./file-state.js";
 import { defineTool, resolveInWorkspace } from "./types.js";
 
 const DEFAULT_LIMIT = 2000;
@@ -35,6 +36,7 @@ export const readTool = defineTool({
     const buf = await readFile(p);
     if (buf.subarray(0, 8192).includes(0)) return { content: `${p} appears to be a binary file.`, isError: true };
 
+    ctx.fileState.record(p, { mtimeMs: st.mtimeMs, size: st.size, hash: hashContent(buf) });
     const text = buf.toString("utf8");
     if (text.length === 0) return { content: "(file is empty)" };
 

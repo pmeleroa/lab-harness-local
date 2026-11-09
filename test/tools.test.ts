@@ -1,14 +1,17 @@
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { readTool } from "../src/tools/read.js";
 import { globTool } from "../src/tools/search.js";
+import { FileStateCache } from "../src/tools/file-state.js";
+import { editTool } from "../src/tools/edit.js";
+import { writeTool } from "../src/tools/write.js";
 
 let workspace: string;
 let outside: string;
-const ctx = () => ({ workspace, signal: new AbortController().signal });
+const ctx = (fileState = new FileStateCache()) => ({ workspace, signal: new AbortController().signal, fileState });
 
 beforeAll(() => {
   const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), "lab-tools-")));
@@ -99,5 +102,109 @@ describe("ToolRegistry", () => {
   it("genera JSON Schema para el modelo", () => {
     const spec = registry.specs().find((s) => s.name === "Read");
     expect(spec?.inputSchema).toMatchObject({ type: "object", required: ["file_path"] });
+  });
+});
+
+describe("Edit y Write: read-before-edit", () => {
+  const file = (name: string, content: string) => {
+    writeFileSync(path.join(workspace, name), content);
+    return name;
+  };
+
+  it("Edit sin haber leído el fichero falla y no lo toca", async () => {
+    const f = file("e1.txt", "uno\ndos\n");
+    const r = await editTool.run({ file_path: f, old_string: "uno", new_string: "UNO" }, ctx());
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("has not been read yet");
+    expect(readFileSync(path.join(workspace, f), "utf8")).toBe("uno\ndos\n");
+  });
+
+  it("Edit tras leer cambia el fichero", async () => {
+    const f = file("e2.txt", "uno\ndos\n");
+    const c = ctx();
+    await readTool.run({ file_path: f }, c);
+    const r = await editTool.run({ file_path: f, old_string: "dos", new_string: "DOS" }, c);
+    expect(r.isError).toBeUndefined();
+    expect(readFileSync(path.join(workspace, f), "utf8")).toBe("uno\nDOS\n");
+  });
+
+  it("Edit falla si el fichero cambió de tamaño tras la lectura", async () => {
+    const f = file("e3.txt", "uno\n");
+    const c = ctx();
+    await readTool.run({ file_path: f }, c);
+    writeFileSync(path.join(workspace, f), "uno\ncambio externo\n");
+    const r = await editTool.run({ file_path: f, old_string: "uno", new_string: "UNO" }, c);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("modified since it was last read");
+  });
+
+  it("Edit falla si cambió el mtime con el mismo tamaño", async () => {
+    const f = file("e4.txt", "abc\n");
+    const c = ctx();
+    await readTool.run({ file_path: f }, c);
+    const t = new Date(Date.now() + 60_000);
+    utimesSync(path.join(workspace, f), t, t);
+    const r = await editTool.run({ file_path: f, old_string: "abc", new_string: "xyz" }, c);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("modified since it was last read");
+  });
+
+  it("old_string ausente, repetido y con prefijos de línea", async () => {
+    const f = file("e5.txt", "x = 1\nx = 1\ny = 2\n");
+    const c = ctx();
+    await readTool.run({ file_path: f }, c);
+    const absent = await editTool.run({ file_path: f, old_string: "zzz", new_string: "q" }, c);
+    expect(absent.isError).toBe(true);
+    expect(absent.content).toContain("not found");
+    const dup = await editTool.run({ file_path: f, old_string: "x = 1", new_string: "x = 9" }, c);
+    expect(dup.isError).toBe(true);
+    expect(dup.content).toContain("matches 2 times");
+    const prefixed = await editTool.run({ file_path: f, old_string: "3\ty = 2", new_string: "y = 3" }, c);
+    expect(prefixed.isError).toBe(true);
+    expect(prefixed.content).toContain("line-number prefixes");
+    expect(readFileSync(path.join(workspace, f), "utf8")).toBe("x = 1\nx = 1\ny = 2\n");
+  });
+
+  it("replace_all cambia todas las apariciones", async () => {
+    const f = file("e6.txt", "x = 1\nx = 1\ny = 2\n");
+    const c = ctx();
+    await readTool.run({ file_path: f }, c);
+    const r = await editTool.run({ file_path: f, old_string: "x = 1", new_string: "x = 9", replace_all: true }, c);
+    expect(r.isError).toBeUndefined();
+    expect(r.content).toContain("2 replacements");
+    expect(readFileSync(path.join(workspace, f), "utf8")).toBe("x = 9\nx = 9\ny = 2\n");
+  });
+
+  it("Edit permite encadenar ediciones: la propia escritura actualiza el estado", async () => {
+    const f = file("e7.txt", "a\nb\n");
+    const c = ctx();
+    await readTool.run({ file_path: f }, c);
+    expect((await editTool.run({ file_path: f, old_string: "a", new_string: "A" }, c)).isError).toBeUndefined();
+    expect((await editTool.run({ file_path: f, old_string: "b", new_string: "B" }, c)).isError).toBeUndefined();
+  });
+
+  it("Write crea un fichero nuevo con sus directorios sin exigir lectura", async () => {
+    const r = await writeTool.run({ file_path: "nuevo/dir/f.txt", content: "hola\n" }, ctx());
+    expect(r.isError).toBeUndefined();
+    expect(r.content).toContain("Created");
+    expect(readFileSync(path.join(workspace, "nuevo/dir/f.txt"), "utf8")).toBe("hola\n");
+  });
+
+  it("Write exige haber leído un fichero existente para sobrescribirlo", async () => {
+    const f = file("w1.txt", "original\n");
+    const blind = await writeTool.run({ file_path: f, content: "pisado\n" }, ctx());
+    expect(blind.isError).toBe(true);
+    expect(readFileSync(path.join(workspace, f), "utf8")).toBe("original\n");
+    const c = ctx();
+    await readTool.run({ file_path: f }, c);
+    const ok = await writeTool.run({ file_path: f, content: "pisado\n" }, c);
+    expect(ok.isError).toBeUndefined();
+    expect(ok.content).toContain("Overwrote");
+  });
+
+  it("sin motor de permisos, Write y Edit no salen del workspace", async () => {
+    const w = await writeTool.run({ file_path: "../fuera.txt", content: "x" }, ctx());
+    expect(w.isError).toBe(true);
+    expect(existsSync(path.join(path.dirname(workspace), "fuera.txt"))).toBe(false);
   });
 });

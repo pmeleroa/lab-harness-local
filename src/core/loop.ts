@@ -24,6 +24,7 @@ import {
   summaryMessage,
 } from "../context/manager.js";
 import { OVERFLOW_MIN_GROWTH_COMPACT, type RequestSample, looksTruncated } from "../context/overflow.js";
+import { FileStateCache } from "../tools/file-state.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { AgentEvent, AgentState, EventBus, RunEndReason } from "./events.js";
 
@@ -81,6 +82,9 @@ export class Agent {
   private measured: { tokens: number; estimate: number } | null = null;
   /** La última petición que el servidor no recortó: base para detectar que la siguiente sí lo ha sido. */
   private lastSample: RequestSample | null = null;
+
+  /** Lo que el modelo ha leído en este run: Edit y Write lo exigen antes de modificar un fichero. */
+  private fileState = new FileStateCache();
 
   constructor(
     private deps: AgentDeps,
@@ -371,7 +375,7 @@ export class Agent {
     const t0 = Date.now();
     let out: ToolResultBlock;
     try {
-      const r = await tool.run(input, { workspace: this.deps.workspace, signal, callId: call.id });
+      const r = await tool.run(input, { workspace: this.deps.workspace, signal, fileState: this.fileState, callId: call.id });
       out = result(capToolResult(r.content, this.toolResultCap), !!r.isError);
     } catch (e) {
       out = result(`Tool ${call.name} failed: ${errorMessage(e)}`, true);
