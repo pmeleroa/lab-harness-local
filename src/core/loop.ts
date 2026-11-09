@@ -410,7 +410,12 @@ export class Agent {
     let denyMessage = `Permission denied: ${decision.reason}.`;
     if (decision.kind === "ask") {
       source = "user";
-      const answer = await this.approvalLock.run(() => {
+      const answer = await this.approvalLock.run(async (): Promise<ApprovalAnswer> => {
+        // Las llamadas en paralelo se evalúan antes de que el usuario responda a la primera: si un «siempre» ya
+        // cubre a esta, se reevalúa con las reglas de sesión actuales en lugar de volver a preguntar.
+        const again = this.deps.policy.evaluate(call, target);
+        if (again.kind === "allow") return { kind: "allow_once" };
+        if (again.kind === "deny") return { kind: "deny", feedback: again.reason };
         this.emit({ t: "permission_request", call, reason: decision.reason });
         return this.deps.approver({ call, reason: decision.reason, suggestedRule: this.deps.policy.suggestRule(call, target) });
       });
@@ -420,7 +425,7 @@ export class Agent {
       if (answer.kind === "deny")
         denyMessage = `The user denied this action${answer.feedback ? `: ${answer.feedback}` : "."} Do not retry it with another tool; ask the user how to proceed if needed.`;
     }
-    this.emit({ t: "permission_decision", call, decision: allowed ? "allow" : "deny", source });
+    this.emit({ t: "permission_decision", call, decision: allowed ? "allow" : "deny", source, reason: decision.reason });
     if (!allowed) return result(denyMessage, true);
 
     this.emit({ t: "tool_start", call });

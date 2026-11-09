@@ -1,10 +1,16 @@
 #!/usr/bin/env node
+import readline from "node:readline/promises";
+import path from "node:path";
 import { parseArgs } from "node:util";
+import { type Approver, denyAllApprover } from "./core/loop.js";
 import { createHarness } from "./index.js";
+import { ttyApprover } from "./policy/approver.js";
+import type { PermissionMode } from "./policy/engine.js";
+import { PERMISSION_MODES, loadSettings } from "./policy/settings.js";
 import type { AgentEvent } from "./core/events.js";
 import { VERSION } from "./version.js";
 
-const HELP = `lab-harness-local ${VERSION}: un harness de solo lectura para preguntar sobre un repositorio
+const HELP = `lab-harness-local ${VERSION}: un harness para agentes de código en terminal
 
 Uso: npm run dev -- [opciones] "<pregunta>"
 
@@ -14,6 +20,10 @@ Uso: npm run dev -- [opciones] "<pregunta>"
                           (defecto: $OPENAI_BASE_URL o http://localhost:11434/v1)
       --context-window <n>  ventana de contexto del modelo, en tokens (defecto: 4096)
       --max-turns <n>     turnos máximos del run (defecto: 25)
+      --permission-mode <modo>  default (pregunta antes de escribir) | acceptEdits (escribe dentro del
+                          workspace) | bypass (no pregunta; un deny sigue ganando)
+      --allow <regla>     regla allow extra, repetible: --allow "Edit(src/**)"
+      --deny <regla>      regla deny extra, repetible: --deny "Edit(**/.env*)"
   -h, --help
 `;
 
@@ -25,6 +35,9 @@ const { values, positionals } = parseArgs({
     "base-url": { type: "string" },
     "context-window": { type: "string" },
     "max-turns": { type: "string" },
+    "permission-mode": { type: "string" },
+    allow: { type: "string", multiple: true, default: [] },
+    deny: { type: "string", multiple: true, default: [] },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -47,7 +60,29 @@ if (contextWindow !== undefined && (!Number.isInteger(contextWindow) || contextW
   process.exit(2);
 }
 
-const { agent, bus, workspace, model, warnings } = createHarness({
+const requestedMode = values["permission-mode"];
+if (requestedMode && !PERMISSION_MODES.has(requestedMode)) {
+  process.stderr.write("--permission-mode debe ser default, acceptEdits o bypass\n");
+  process.exit(2);
+}
+
+// El bloque `permissions` de <workspace>/.harness/settings.json, más --allow y --deny. El flag manda sobre el fichero.
+const settings = loadSettings(path.resolve(values.workspace ?? process.cwd()));
+const permissionMode = (requestedMode as PermissionMode | undefined) ?? settings.mode;
+
+// Con terminal en stdin y stderr se pregunta; sin ella (CI, `< /dev/null`) todo `ask` se convierte en `deny`.
+const canAsk = !!process.stdin.isTTY && !!process.stderr.isTTY;
+const rl = canAsk ? readline.createInterface({ input: process.stdin, output: process.stderr, terminal: true }) : null;
+const approver: Approver = rl ? ttyApprover(rl) : denyAllApprover;
+
+const { agent, bus, workspace, model, policy, warnings } = createHarness({
+  ...(permissionMode ? { permissionMode } : {}),
+  rules: {
+    allow: [...settings.rules.allow, ...values.allow],
+    ask: settings.rules.ask,
+    deny: [...settings.rules.deny, ...values.deny],
+  },
+  approver,
   ...(values.workspace ? { workspace: values.workspace } : {}),
   ...(values.model ? { model: values.model } : {}),
   ...(values["base-url"] ? { baseURL: values["base-url"] } : {}),
@@ -70,7 +105,11 @@ bus.on((e: AgentEvent) => {
     return;
   }
   const line =
-    e.t === "tool_start"
+    e.t === "permission_decision"
+      ? e.decision === "deny" && e.source === "policy"
+        ? `x ${e.call.name} denegado: ${e.reason}`
+        : null
+      : e.t === "tool_start"
       ? `> ${e.call.name} ${short(e.call.input)}`
       : e.t === "tool_end"
         ? `  ${e.result.is_error ? "error" : "ok"} (${e.durationMs} ms${e.result.content.includes("characters omitted") ? ", recortado al tope" : ""})`
@@ -89,11 +128,17 @@ bus.on((e: AgentEvent) => {
   atLineStart = true;
 });
 
-process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\n`);
+process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\n`);
+for (const w of settings.warnings) process.stderr.write(`! ${w}\n`);
 for (const w of warnings) process.stderr.write(`! ${w}\n`);
 process.stderr.write("\n");
 const ctl = new AbortController();
 process.once("SIGINT", () => ctl.abort());
+// Con terminal, readline captura Ctrl+C: si había una pregunta pendiente, se sale sin ejecutar nada más.
+rl?.once("SIGINT", () => {
+  process.stderr.write("\ninterrumpido\n");
+  process.exit(130);
+});
 
 const result = await agent.run(prompt, ctl.signal);
 if (!atLineStart) process.stdout.write("\n");
@@ -101,4 +146,5 @@ process.stderr.write(
   `\n[${result.reason}] ${result.turns} turnos, ${result.toolCalls} llamadas, ${result.usage.inputTokens} tokens de entrada, ${result.usage.outputTokens} de salida\n`,
 );
 if (result.error) process.stderr.write(`${result.error}\n`);
+rl?.close();
 process.exit(result.reason === "end_turn" ? 0 : 1);
