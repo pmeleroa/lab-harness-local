@@ -56,8 +56,8 @@ export class PolicyEngine {
   }
 
   /**
-   * Regla para "siempre". Las rutas se gestionan con modos (`acceptEdits`), no con reglas ad hoc, así que solo se
-   * sugiere para las lecturas fuera del workspace y las escrituras con ruta.
+   * Regla para "siempre". Escribir se gestiona con modos (`acceptEdits`), no con reglas ad hoc, así que solo se
+   * sugiere para una lectura, que es lo único que pregunta fuera del workspace sin ser una escritura.
    */
   suggestRule(call: ToolUseBlock, target: PermissionTarget): string | null {
     return target.access === "read" ? `${call.name}(${target.path})` : null;

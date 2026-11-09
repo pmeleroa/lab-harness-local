@@ -272,6 +272,15 @@ describe("Edit y Write: read-before-edit", () => {
     expect(decide(editTool, input, { mode: "bypass" }).decision.kind).toBe("allow");
   });
 
+  it("bypass: escribir fuera del workspace se permite sin preguntar, salvo que un deny lo cubra", () => {
+    const outsideFile = path.join(outside, "nuevo.txt");
+    const w = decide(writeTool, { file_path: outsideFile, content: "x" }, { mode: "bypass" });
+    expect(w.decision.kind).toBe("allow");
+    expect(w.decision.reason).toContain("bypass mode");
+    const denied = decide(writeTool, { file_path: outsideFile, content: "x" }, { mode: "bypass", rules: { deny: [`Edit(${outside}/**)`] } });
+    expect(denied.decision.kind).toBe("deny");
+  });
+
   it("un deny gana en cualquier modo y Edit(...) cubre también a Write", () => {
     const rules = { deny: ["Edit(**/.env*)"] };
     for (const mode of ["default", "acceptEdits", "bypass"] as const) {
