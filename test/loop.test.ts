@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { createHarness } from "../src/index.js";
+import { type HarnessOptions, createHarness } from "../src/index.js";
 import type { AgentEvent } from "../src/core/events.js";
 import type { Block, Message, Provider } from "../src/providers/canonical.js";
 import { FakeProvider, type Script, text, use } from "./fake-provider.js";
@@ -194,13 +194,13 @@ describe("herramientas que fallan no rompen el bucle", () => {
     expectEveryCallAnswered(agent.messages);
   });
 
-  it("una ruta fuera del workspace vuelve como error y el modelo la ve", async () => {
+  it("una lectura fuera del workspace sin terminal se deniega y el modelo ve el motivo", async () => {
     const { agent } = setup((_req, turn) =>
       turn === 1 ? { content: [use("c1", "Read", { file_path: "../../etc/passwd" })] } : { content: [text("no puedo")] },
     );
     await agent.run("lee");
     expect(agent.messages[2]!.content[0]).toMatchObject({ type: "tool_result", is_error: true });
-    expect(JSON.stringify(agent.messages[2])).toContain("outside the workspace");
+    expect(JSON.stringify(agent.messages[2])).toContain("No interactive user available");
   });
 
   it("varias llamadas en un turno devuelven los resultados en el mismo orden", async () => {
@@ -212,5 +212,96 @@ describe("herramientas que fallan no rompen el bucle", () => {
     await agent.run("todo");
     expect(agent.messages[2]!.content.map((b) => b.type === "tool_result" && b.tool_use_id)).toEqual(["a", "b", "c"]);
     expectEveryCallAnswered(agent.messages);
+  });
+});
+
+/** Un workspace propio por test: estos escriben. */
+function writable(files: Record<string, string> = {}) {
+  const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), "lab-perm-")));
+  const ws = path.join(base, "ws");
+  const outside = path.join(base, "fuera");
+  mkdirSync(path.join(ws, "src"), { recursive: true });
+  mkdirSync(outside);
+  writeFileSync(path.join(ws, "src", "a.ts"), "export const a = 1;\n");
+  for (const [f, c] of Object.entries(files)) writeFileSync(path.join(ws, f), c);
+  return { ws, outside };
+}
+
+function runWith(ws: string, calls: Block[], o: Partial<HarnessOptions> = {}) {
+  const provider = new FakeProvider((_req, turn) => (turn === 1 ? { content: calls } : { content: [text("hecho")] }));
+  const h = createHarness({ workspace: ws, provider, ...o });
+  const events: AgentEvent[] = [];
+  h.bus.on((e) => events.push(e));
+  return { ...h, events };
+}
+
+const resultText = (agent: { messages: Message[] }) => JSON.stringify(agent.messages[2]);
+
+describe("permisos en el bucle", () => {
+  it("default: Edit pregunta y, sin terminal, se deniega sin tocar el fichero", async () => {
+    const { ws } = writable();
+    const { agent } = runWith(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "1", new_string: "2" })]);
+    await agent.run("cambia");
+    expect(readFileSync(path.join(ws, "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    expect(resultText(agent)).toContain("No interactive user available");
+  });
+
+  it("acceptEdits: Read y Edit dentro del workspace, sin preguntar", async () => {
+    const { ws } = writable();
+    // En el mismo turno los dos van seguidos: Read es de solo lectura y Edit no, así que corren en orden.
+    const { agent, events } = runWith(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "= 1", new_string: "= 2" })], { permissionMode: "acceptEdits" });
+    await agent.run("cambia");
+    expect(readFileSync(path.join(ws, "src/a.ts"), "utf8")).toBe("export const a = 2;\n");
+    expect(events.some((e) => e.t === "permission_request")).toBe(false);
+  });
+
+  it("bypass: un deny sigue ganando", async () => {
+    const { ws } = writable({ ".env": "TOKEN=1\n" });
+    const { agent, events } = runWith(ws, [use("r", "Read", { file_path: ".env" }), use("e", "Edit", { file_path: ".env", old_string: "1", new_string: "2" })], {
+      permissionMode: "bypass",
+      rules: { deny: ["Read(**/.env*)", "Edit(**/.env*)"] },
+    });
+    await agent.run("cambia");
+    expect(readFileSync(path.join(ws, ".env"), "utf8")).toBe("TOKEN=1\n");
+    expect(resultText(agent)).toContain("Permission denied");
+    expect(events.filter((e) => e.t === "permission_decision" && e.decision === "deny")).toHaveLength(2);
+  });
+
+  it("Edit(...) cubre a Write y una regla deny no deja crear el fichero", async () => {
+    const { ws } = writable();
+    const { agent } = runWith(ws, [use("w", "Write", { file_path: ".harness/settings.json", content: "{}" })], {
+      permissionMode: "acceptEdits",
+      rules: { deny: ["Edit(.harness/**)"] },
+    });
+    await agent.run("amplía permisos");
+    expect(() => readFileSync(path.join(ws, ".harness/settings.json"))).toThrow();
+    expect(resultText(agent)).toContain("Permission denied");
+  });
+
+  it("acceptEdits: escribir fuera del workspace pregunta y sin terminal se deniega", async () => {
+    const { ws, outside } = writable();
+    const { agent } = runWith(ws, [use("w", "Write", { file_path: path.join(outside, "x.txt"), content: "x" })], { permissionMode: "acceptEdits" });
+    await agent.run("escribe fuera");
+    expect(() => readFileSync(path.join(outside, "x.txt"))).toThrow();
+    expect(resultText(agent)).toContain("No interactive user available");
+  });
+
+  it("un enlace simbólico hacia fuera se trata como fuera: ni leer ni escribir sin permiso", async () => {
+    const { ws, outside } = writable();
+    writeFileSync(path.join(outside, "token.txt"), "TOP-SECRET");
+    symlinkSync(outside, path.join(ws, "link-out"));
+    const { agent } = runWith(ws, [use("r", "Read", { file_path: "link-out/token.txt" }), use("w", "Write", { file_path: "link-out/nuevo.txt", content: "x" })], { permissionMode: "acceptEdits" });
+    await agent.run("sigue el enlace");
+    expect(resultText(agent)).not.toContain("TOP-SECRET");
+    expect(() => readFileSync(path.join(outside, "nuevo.txt"))).toThrow();
+  });
+
+  it("un deny de lectura oculta el fichero también a Grep", async () => {
+    const { ws } = writable({ ".env": "TOKEN=1\n", "notas.txt": "TOKEN=2\n" });
+    const { agent } = runWith(ws, [use("g", "Grep", { pattern: "TOKEN", output_mode: "content" })], { rules: { deny: ["Read(**/.env*)"] } });
+    await agent.run("busca");
+    expect(resultText(agent)).toContain("notas.txt");
+    expect(resultText(agent)).not.toContain(".env:");
+    expect(resultText(agent)).toContain("excluded by permission rules");
   });
 });

@@ -1,8 +1,8 @@
 {
   "name": "lab-harness-local",
   "private": true,
-  "version": "0.2.0",
-  "description": "Un harness para agentes de código en terminal, construido parte a parte: bucle, contrato de inferencia y herramientas de lectura",
+  "version": "0.3.0",
+  "description": "Un harness para agentes de código en terminal, construido parte a parte: bucle, contrato de inferencia, contexto y herramientas con permisos",
   "type": "module",
   "license": "MIT",
   "engines": {

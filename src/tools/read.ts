@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { z } from "zod";
-import { defineTool, resolveInWorkspace } from "./types.js";
+import { hashContent } from "./file-state.js";
+import { defineTool, resolveReal } from "./types.js";
 
 const DEFAULT_LIMIT = 2000;
 const MAX_LINE_CHARS = 2000;
@@ -10,9 +11,10 @@ export const readTool = defineTool({
   name: "Read",
   description: [
     "Reads a text file from the filesystem.",
-    "- file_path is relative to the workspace root. Paths outside the workspace are rejected.",
+    "- file_path can be absolute or relative to the workspace root.",
     `- Returns up to ${DEFAULT_LIMIT} lines by default; use offset/limit (1-based) to page through large files.`,
     "- Output uses `cat -n` format: line number, a tab, then the line.",
+    "- You must Read a file before you Edit or overwrite it.",
     `- Lines longer than ${MAX_LINE_CHARS} characters are truncated.`,
   ].join("\n"),
   schema: z.object({
@@ -21,11 +23,10 @@ export const readTool = defineTool({
     limit: z.number().int().min(1).optional().describe("Number of lines to read"),
   }),
   readOnly: true,
+  permissionTarget: (input, ctx) => ({ kind: "path", path: resolveReal(ctx.workspace, input.file_path), access: "read" }),
 
   async run(input, ctx) {
-    const resolved = await resolveInWorkspace(ctx.workspace, input.file_path);
-    if (!resolved.ok) return resolved.error;
-    const p = resolved.path;
+    const p = resolveReal(ctx.workspace, input.file_path);
     const st = await stat(p).catch(() => null);
     if (!st) return { content: `File does not exist: ${p}`, isError: true };
     if (st.isDirectory()) return { content: `${p} is a directory, not a file.`, isError: true };
@@ -35,6 +36,7 @@ export const readTool = defineTool({
     const buf = await readFile(p);
     if (buf.subarray(0, 8192).includes(0)) return { content: `${p} appears to be a binary file.`, isError: true };
 
+    ctx.fileState.record(p, { mtimeMs: st.mtimeMs, size: st.size, hash: hashContent(buf) });
     const text = buf.toString("utf8");
     if (text.length === 0) return { content: "(file is empty)" };
 
