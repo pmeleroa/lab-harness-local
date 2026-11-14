@@ -105,6 +105,10 @@ const { agent, bus, workspace, model, policy, bash, warnings, endRun, dispose } 
   ...(values.model ? { model: values.model } : {}),
   ...(values["base-url"] ? { baseURL: values["base-url"] } : {}),
   config: { ...(maxTurns ? { maxTurns } : {}), ...(contextWindow ? { contextWindow } : {}) },
+}).catch((e: unknown) => {
+  // Por ejemplo, `--sandbox bwrap` sin bwrap: pedir un sandbox concreto que no funciona impide arrancar.
+  process.stderr.write(`fatal: ${e instanceof Error ? e.message : String(e)}\n`);
+  process.exit(1);
 });
 
 /** 1234 -> 1,2k; 4096 -> 4,1k */
