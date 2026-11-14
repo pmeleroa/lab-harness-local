@@ -6,7 +6,8 @@ import { type Approver, denyAllApprover } from "./core/loop.js";
 import { createHarness } from "./index.js";
 import { ttyApprover } from "./policy/approver.js";
 import type { PermissionMode } from "./policy/engine.js";
-import { PERMISSION_MODES, loadSettings } from "./policy/settings.js";
+import { PERMISSION_MODES, SANDBOX_CHOICES, loadSettings } from "./policy/settings.js";
+import type { SandboxChoice } from "./policy/sandbox/index.js";
 import type { AgentEvent } from "./core/events.js";
 import { VERSION } from "./version.js";
 
@@ -24,6 +25,9 @@ Uso: npm run dev -- [opciones] "<pregunta>"
                           workspace) | bypass (no pregunta; un deny sigue ganando)
       --allow <regla>     regla allow extra, repetible: --allow "Edit(src/**)"
       --deny <regla>      regla deny extra, repetible: --deny "Edit(**/.env*)"
+      --sandbox <modo>    auto (defecto: bwrap en Linux, sandbox-exec en macOS) | bwrap | seatbelt |
+                          none (los comandos corren con todos tus permisos)
+      --no-network        sin red dentro del sandbox
   -h, --help
 `;
 
@@ -38,6 +42,8 @@ const { values, positionals } = parseArgs({
     "permission-mode": { type: "string" },
     allow: { type: "string", multiple: true, default: [] },
     deny: { type: "string", multiple: true, default: [] },
+    sandbox: { type: "string" },
+    "no-network": { type: "boolean" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -66,6 +72,12 @@ if (requestedMode && !PERMISSION_MODES.has(requestedMode)) {
   process.exit(2);
 }
 
+const requestedSandbox = values.sandbox;
+if (requestedSandbox && !SANDBOX_CHOICES.has(requestedSandbox)) {
+  process.stderr.write("--sandbox debe ser auto, bwrap, seatbelt o none\n");
+  process.exit(2);
+}
+
 // El bloque `permissions` de <workspace>/.harness/settings.json, más --allow y --deny. El flag manda sobre el fichero.
 const settings = loadSettings(path.resolve(values.workspace ?? process.cwd()));
 const permissionMode = (requestedMode as PermissionMode | undefined) ?? settings.mode;
@@ -75,8 +87,14 @@ const canAsk = !!process.stdin.isTTY && !!process.stderr.isTTY;
 const rl = canAsk ? readline.createInterface({ input: process.stdin, output: process.stderr, terminal: true }) : null;
 const approver: Approver = rl ? ttyApprover(rl) : denyAllApprover;
 
-const { agent, bus, workspace, model, policy, warnings } = createHarness({
+// El sandbox: --sandbox manda sobre el fichero; la red se corta con --no-network o desde el fichero, nunca se abre.
+const sandboxChoice = (requestedSandbox as SandboxChoice | undefined) ?? settings.sandbox.mode;
+const network = values["no-network"] ? "none" : settings.sandbox.network;
+
+const { agent, bus, workspace, model, policy, bash, warnings, endRun, dispose } = await createHarness({
   ...(permissionMode ? { permissionMode } : {}),
+  ...(sandboxChoice ? { sandbox: sandboxChoice } : {}),
+  ...(network ? { network } : {}),
   rules: {
     allow: [...settings.rules.allow, ...values.allow],
     ask: settings.rules.ask,
@@ -87,10 +105,21 @@ const { agent, bus, workspace, model, policy, warnings } = createHarness({
   ...(values.model ? { model: values.model } : {}),
   ...(values["base-url"] ? { baseURL: values["base-url"] } : {}),
   config: { ...(maxTurns ? { maxTurns } : {}), ...(contextWindow ? { contextWindow } : {}) },
+}).catch((e: unknown) => {
+  // Por ejemplo, `--sandbox bwrap` sin bwrap: pedir un sandbox concreto que no funciona impide arrancar.
+  process.stderr.write(`fatal: ${e instanceof Error ? e.message : String(e)}\n`);
+  process.exit(1);
 });
 
 /** 1234 -> 1,2k; 4096 -> 4,1k */
 const k = (n: number) => (n >= 1_000 ? `${(n / 1_000).toFixed(1).replace(".", ",")}k` : String(n));
+
+/** Salida de un comando, sangrada y con 20 líneas como mucho. */
+const indent = (s: string) => {
+  const lines = s.split("\n");
+  const shown = lines.length > 20 ? [...lines.slice(0, 20), `… (${lines.length - 20} líneas más)`] : lines;
+  return shown.map((l) => `  | ${l}`).join("\n");
+};
 
 const short = (v: unknown) => {
   const s = JSON.stringify(v);
@@ -114,23 +143,29 @@ bus.on((e: AgentEvent) => {
       : e.t === "tool_start"
       ? `> ${e.call.name} ${short(e.call.input)}`
       : e.t === "tool_end"
-        ? `  ${e.result.is_error ? "error" : "ok"} (${e.durationMs} ms${e.result.content.includes("characters omitted") ? ", recortado al tope" : ""})`
-        : e.t === "warning"
-          ? `! ${e.message}`
-          : e.t === "context"
-            ? `~ ${e.action === "cleared" ? `limpiados ${e.count} resultados antiguos` : "conversación compactada"}: ${k(e.before)} -> ${k(e.after)} tokens`
-            : e.t === "turn_end"
-              ? e.truncated
-                ? "ctx ? (el servidor recortó la conversación)"
-                : `ctx ${k(e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens + e.usage.outputTokens)}/${k(agent.contextWindow)} (${Math.round(((e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens + e.usage.outputTokens) / agent.contextWindow) * 100)}%)`
-              : null;
+        ? `  ${e.result.is_error ? "error" : "ok"} (${e.durationMs} ms${e.result.content.includes("characters omitted") ? ", recortado al tope" : ""})` +
+          // De un comando se enseña también lo que devolvió: es lo que el modelo va a leer.
+          (e.call.name === "Bash" ? `\n${indent(e.result.content)}` : "")
+        : e.t === "task_start"
+          ? `& ${e.kind}·${e.id} en segundo plano: ${e.description}`
+          : e.t === "task_end"
+            ? `& ${e.kind}·${e.id} ${e.status}${e.exitCode != null ? ` (código ${e.exitCode})` : ""}`
+            : e.t === "warning"
+              ? `! ${e.message}`
+              : e.t === "context"
+                ? `~ ${e.action === "cleared" ? `limpiados ${e.count} resultados antiguos` : "conversación compactada"}: ${k(e.before)} -> ${k(e.after)} tokens`
+                : e.t === "turn_end"
+                  ? e.truncated
+                    ? "ctx ? (el servidor recortó la conversación)"
+                    : `ctx ${k(e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens + e.usage.outputTokens)}/${k(agent.contextWindow)} (${Math.round(((e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens + e.usage.outputTokens) / agent.contextWindow) * 100)}%)`
+                  : null;
   if (line === null) return;
   if (!atLineStart) process.stdout.write("\n");
   process.stderr.write(`${line}\n`);
   atLineStart = true;
 });
 
-process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\n`);
+process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\nsandbox: ${bash.sandboxName}${network !== "none" ? "" : bash.sandboxName === "none" ? " (--no-network no tiene efecto sin sandbox)" : ", sin red"}\n`);
 for (const w of settings.warnings) process.stderr.write(`! ${w}\n`);
 for (const w of warnings) process.stderr.write(`! ${w}\n`);
 process.stderr.write("\n");
@@ -143,10 +178,13 @@ rl?.once("SIGINT", () => {
 });
 
 const result = await agent.run(prompt, ctl.signal);
+// Un run de la CLI no tiene turno siguiente: lo que siga en segundo plano se mata (y se avisa).
+await endRun();
 if (!atLineStart) process.stdout.write("\n");
 process.stderr.write(
   `\n[${result.reason}] ${result.turns} turnos, ${result.toolCalls} llamadas, ${result.usage.inputTokens} tokens de entrada, ${result.usage.outputTokens} de salida\n`,
 );
 if (result.error) process.stderr.write(`${result.error}\n`);
 rl?.close();
+dispose();
 process.exit(result.reason === "end_turn" ? 0 : 1);

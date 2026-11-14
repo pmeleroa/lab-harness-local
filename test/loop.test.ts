@@ -15,9 +15,9 @@ beforeAll(() => {
   writeFileSync(path.join(workspace, "src", "a.ts"), "export const a = 1;\n");
 });
 
-function setup(script: Script, config = {}) {
+async function setup(script: Script, config = {}) {
   const provider = new FakeProvider(script);
-  const h = createHarness({ workspace, provider, config });
+  const h = await createHarness({ workspace, provider, config });
   const events: AgentEvent[] = [];
   h.bus.on((e) => events.push(e));
   return { ...h, provider, events };
@@ -37,7 +37,7 @@ function expectEveryCallAnswered(messages: Message[]) {
 
 describe("final: end_turn", () => {
   it("llama a una herramienta, recibe el resultado y responde", async () => {
-    const { agent, provider, events } = setup((_req, turn) =>
+    const { agent, provider, events } = await setup((_req, turn) =>
       turn === 1 ? { content: [use("c1", "Read", { file_path: "src/a.ts" })] } : { content: [text("a vale 1")] },
     );
     const r = await agent.run("¿cuánto vale a?");
@@ -52,7 +52,7 @@ describe("final: end_turn", () => {
   });
 
   it("emite el texto en streaming por el bus", async () => {
-    const { agent, events } = setup(() => ({ content: [text("hola")] }));
+    const { agent, events } = await setup(() => ({ content: [text("hola")] }));
     await agent.run("hi");
     expect(events.filter((e) => e.t === "text_delta")).toEqual([{ t: "text_delta", text: "hola" }]);
   });
@@ -61,7 +61,7 @@ describe("final: end_turn", () => {
 describe("final: max_turns", () => {
   it("corta un modelo que nunca termina", async () => {
     // Cada turno pide un fichero distinto para no activar el circuit breaker.
-    const { agent } = setup((_req, turn) => ({ content: [use(`c${turn}`, "Glob", { pattern: `*${turn}.ts` })] }), { maxTurns: 3 });
+    const { agent } = await setup((_req, turn) => ({ content: [use(`c${turn}`, "Glob", { pattern: `*${turn}.ts` })] }), { maxTurns: 3 });
     const r = await agent.run("busca");
     expect(r).toMatchObject({ reason: "max_turns", turns: 3, toolCalls: 3 });
     expectEveryCallAnswered(agent.messages);
@@ -70,7 +70,7 @@ describe("final: max_turns", () => {
 
 describe("final: repeated_failure", () => {
   it("para cuando la misma llamada falla tres veces seguidas", async () => {
-    const { agent, events } = setup((_req, turn) => ({ content: [use(`c${turn}`, "Read", { file_path: "no-existe.txt" })] }));
+    const { agent, events } = await setup((_req, turn) => ({ content: [use(`c${turn}`, "Read", { file_path: "no-existe.txt" })] }));
     const r = await agent.run("lee");
     expect(r).toMatchObject({ reason: "repeated_failure", turns: 3, toolCalls: 3 });
     expect(events.some((e) => e.t === "warning")).toBe(true);
@@ -79,7 +79,7 @@ describe("final: repeated_failure", () => {
 
   it("fallos con entradas distintas no cuentan como repetición", async () => {
     const files = ["a.txt", "b.txt", "c.txt", "d.txt"];
-    const { agent } = setup((_req, turn) =>
+    const { agent } = await setup((_req, turn) =>
       turn <= files.length ? { content: [use(`c${turn}`, "Read", { file_path: files[turn - 1] })] } : { content: [text("no hay nada")] },
     );
     expect((await agent.run("lee")).reason).toBe("end_turn");
@@ -87,7 +87,7 @@ describe("final: repeated_failure", () => {
 
   it("un éxito de la misma llamada reinicia la cuenta", async () => {
     const flaky = path.join(workspace, "flaky.txt");
-    const { agent } = setup((_req, turn) => {
+    const { agent } = await setup((_req, turn) => {
       // Falla (no existe), falla, aparece y funciona, desaparece y vuelve a fallar dos veces.
       if (turn === 3) writeFileSync(flaky, "x\n");
       if (turn === 4) rmSync(flaky);
@@ -99,7 +99,7 @@ describe("final: repeated_failure", () => {
 
 describe("final: empty_response", () => {
   it("reintenta una vez con feedback y, si vuelve a pasar, termina", async () => {
-    const { agent, provider, events } = setup(() => ({ content: [] }));
+    const { agent, provider, events } = await setup(() => ({ content: [] }));
     const r = await agent.run("hola");
     expect(r.reason).toBe("empty_response");
     expect(r.turns).toBe(2);
@@ -110,27 +110,27 @@ describe("final: empty_response", () => {
   });
 
   it("si responde tras el feedback, el run continúa con normalidad", async () => {
-    const { agent } = setup((_req, turn) => (turn === 1 ? { content: [] } : { content: [text("ya")] }));
+    const { agent } = await setup((_req, turn) => (turn === 1 ? { content: [] } : { content: [text("ya")] }));
     expect(await agent.run("hola")).toMatchObject({ reason: "end_turn", text: "ya" });
   });
 });
 
 describe("final: max_tokens", () => {
   it("una respuesta truncada no se presenta como un final normal", async () => {
-    const { agent } = setup(() => ({ content: [text("La respuesta empieza")], stopReason: "max_tokens" }));
+    const { agent } = await setup(() => ({ content: [text("La respuesta empieza")], stopReason: "max_tokens" }));
     expect(await agent.run("explica")).toMatchObject({ reason: "max_tokens", text: "La respuesta empieza" });
   });
 });
 
 describe("finales secundarios", () => {
   it("max_tool_calls: corta al superar el tope de llamadas del run", async () => {
-    const { agent } = setup((_req, turn) => ({ content: [use(`c${turn}`, "Glob", { pattern: `*${turn}.ts` })] }), { maxToolCalls: 2 });
+    const { agent } = await setup((_req, turn) => ({ content: [use(`c${turn}`, "Glob", { pattern: `*${turn}.ts` })] }), { maxToolCalls: 2 });
     expect(await agent.run("busca")).toMatchObject({ reason: "max_tool_calls", toolCalls: 2 });
     expectEveryCallAnswered(agent.messages);
   });
 
   it("refusal: el proveedor rechaza la petición", async () => {
-    const { agent } = setup(() => ({ content: [text("No puedo ayudar con eso.")], stopReason: "refusal" }));
+    const { agent } = await setup(() => ({ content: [text("No puedo ayudar con eso.")], stopReason: "refusal" }));
     expect((await agent.run("algo")).reason).toBe("refusal");
   });
 });
@@ -145,7 +145,7 @@ describe("final: error", () => {
         throw new Error("connect ECONNREFUSED 127.0.0.1:11434");
       },
     };
-    const h = createHarness({ workspace, provider });
+    const h = await createHarness({ workspace, provider });
     const r = await h.agent.run("hola");
     expect(r).toMatchObject({ reason: "error", turns: 0 });
     expect(r.error).toContain("ECONNREFUSED");
@@ -160,7 +160,7 @@ describe("final: error", () => {
         yield { t: "text_delta", text: "a medias" };
       },
     };
-    const r = await createHarness({ workspace, provider }).agent.run("hola");
+    const r = await (await createHarness({ workspace, provider })).agent.run("hola");
     expect(r.reason).toBe("error");
     expect(r.error).toContain("without message_end");
   });
@@ -168,7 +168,7 @@ describe("final: error", () => {
 
 describe("final: aborted", () => {
   it("una señal ya cancelada no llama al modelo", async () => {
-    const { agent, provider } = setup(() => ({ content: [text("no")] }));
+    const { agent, provider } = await setup(() => ({ content: [text("no")] }));
     const ctl = new AbortController();
     ctl.abort();
     expect((await agent.run("hola", ctl.signal)).reason).toBe("aborted");
@@ -178,9 +178,9 @@ describe("final: aborted", () => {
 
 describe("herramientas que fallan no rompen el bucle", () => {
   it("input inválido y herramienta inexistente vuelven al modelo como error", async () => {
-    const { agent } = setup((_req, turn) =>
+    const { agent } = await setup((_req, turn) =>
       turn === 1
-        ? { content: [use("c1", "Read", { file_path: 42 }), use("c2", "Bash", { command: "ls" })] }
+        ? { content: [use("c1", "Read", { file_path: 42 }), use("c2", "WebFetch", { url: "https://example.com" })] }
         : { content: [text("vale")] },
     );
     const r = await agent.run("lee");
@@ -190,12 +190,12 @@ describe("herramientas que fallan no rompen el bucle", () => {
     expect(results[0]).toMatchObject({ tool_use_id: "c1", is_error: true });
     expect(JSON.stringify(results[0])).toContain("Invalid input for Read");
     expect(results[1]).toMatchObject({ tool_use_id: "c2", is_error: true });
-    expect(JSON.stringify(results[1])).toContain("Unknown tool: Bash");
+    expect(JSON.stringify(results[1])).toContain("Unknown tool: WebFetch");
     expectEveryCallAnswered(agent.messages);
   });
 
   it("una lectura fuera del workspace sin terminal se deniega y el modelo ve el motivo", async () => {
-    const { agent } = setup((_req, turn) =>
+    const { agent } = await setup((_req, turn) =>
       turn === 1 ? { content: [use("c1", "Read", { file_path: "../../etc/passwd" })] } : { content: [text("no puedo")] },
     );
     await agent.run("lee");
@@ -204,7 +204,7 @@ describe("herramientas que fallan no rompen el bucle", () => {
   });
 
   it("varias llamadas en un turno devuelven los resultados en el mismo orden", async () => {
-    const { agent } = setup((_req, turn) =>
+    const { agent } = await setup((_req, turn) =>
       turn === 1
         ? { content: [use("a", "Glob", { pattern: "*.ts" }), use("b", "Read", { file_path: "src/a.ts" }), use("c", "Read", { file_path: "nada" })] }
         : { content: [text("ok")] },
@@ -227,9 +227,9 @@ function writable(files: Record<string, string> = {}) {
   return { ws, outside };
 }
 
-function runWith(ws: string, calls: Block[], o: Partial<HarnessOptions> = {}) {
+async function runWith(ws: string, calls: Block[], o: Partial<HarnessOptions> = {}) {
   const provider = new FakeProvider((_req, turn) => (turn === 1 ? { content: calls } : { content: [text("hecho")] }));
-  const h = createHarness({ workspace: ws, provider, ...o });
+  const h = await createHarness({ workspace: ws, provider, ...o });
   const events: AgentEvent[] = [];
   h.bus.on((e) => events.push(e));
   return { ...h, events };
@@ -240,7 +240,7 @@ const resultText = (agent: { messages: Message[] }) => JSON.stringify(agent.mess
 describe("permisos en el bucle", () => {
   it("default: Edit pregunta y, sin terminal, se deniega sin tocar el fichero", async () => {
     const { ws } = writable();
-    const { agent } = runWith(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "1", new_string: "2" })]);
+    const { agent } = await runWith(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "1", new_string: "2" })]);
     await agent.run("cambia");
     expect(readFileSync(path.join(ws, "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
     expect(resultText(agent)).toContain("No interactive user available");
@@ -249,7 +249,7 @@ describe("permisos en el bucle", () => {
   it("acceptEdits: Read y Edit dentro del workspace, sin preguntar", async () => {
     const { ws } = writable();
     // En el mismo turno los dos van seguidos: Read es de solo lectura y Edit no, así que corren en orden.
-    const { agent, events } = runWith(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "= 1", new_string: "= 2" })], { permissionMode: "acceptEdits" });
+    const { agent, events } = await runWith(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "= 1", new_string: "= 2" })], { permissionMode: "acceptEdits" });
     await agent.run("cambia");
     expect(readFileSync(path.join(ws, "src/a.ts"), "utf8")).toBe("export const a = 2;\n");
     expect(events.some((e) => e.t === "permission_request")).toBe(false);
@@ -257,7 +257,7 @@ describe("permisos en el bucle", () => {
 
   it("bypass: un deny sigue ganando", async () => {
     const { ws } = writable({ ".env": "TOKEN=1\n" });
-    const { agent, events } = runWith(ws, [use("r", "Read", { file_path: ".env" }), use("e", "Edit", { file_path: ".env", old_string: "1", new_string: "2" })], {
+    const { agent, events } = await runWith(ws, [use("r", "Read", { file_path: ".env" }), use("e", "Edit", { file_path: ".env", old_string: "1", new_string: "2" })], {
       permissionMode: "bypass",
       rules: { deny: ["Read(**/.env*)", "Edit(**/.env*)"] },
     });
@@ -269,7 +269,7 @@ describe("permisos en el bucle", () => {
 
   it("Edit(...) cubre a Write y una regla deny no deja crear el fichero", async () => {
     const { ws } = writable();
-    const { agent } = runWith(ws, [use("w", "Write", { file_path: ".harness/settings.json", content: "{}" })], {
+    const { agent } = await runWith(ws, [use("w", "Write", { file_path: ".harness/settings.json", content: "{}" })], {
       permissionMode: "acceptEdits",
       rules: { deny: ["Edit(.harness/**)"] },
     });
@@ -280,7 +280,7 @@ describe("permisos en el bucle", () => {
 
   it("acceptEdits: escribir fuera del workspace pregunta y sin terminal se deniega", async () => {
     const { ws, outside } = writable();
-    const { agent } = runWith(ws, [use("w", "Write", { file_path: path.join(outside, "x.txt"), content: "x" })], { permissionMode: "acceptEdits" });
+    const { agent } = await runWith(ws, [use("w", "Write", { file_path: path.join(outside, "x.txt"), content: "x" })], { permissionMode: "acceptEdits" });
     await agent.run("escribe fuera");
     expect(() => readFileSync(path.join(outside, "x.txt"))).toThrow();
     expect(resultText(agent)).toContain("No interactive user available");
@@ -290,7 +290,7 @@ describe("permisos en el bucle", () => {
     const { ws, outside } = writable();
     writeFileSync(path.join(outside, "token.txt"), "TOP-SECRET");
     symlinkSync(outside, path.join(ws, "link-out"));
-    const { agent } = runWith(ws, [use("r", "Read", { file_path: "link-out/token.txt" }), use("w", "Write", { file_path: "link-out/nuevo.txt", content: "x" })], { permissionMode: "acceptEdits" });
+    const { agent } = await runWith(ws, [use("r", "Read", { file_path: "link-out/token.txt" }), use("w", "Write", { file_path: "link-out/nuevo.txt", content: "x" })], { permissionMode: "acceptEdits" });
     await agent.run("sigue el enlace");
     expect(resultText(agent)).not.toContain("TOP-SECRET");
     expect(() => readFileSync(path.join(outside, "nuevo.txt"))).toThrow();
@@ -298,7 +298,7 @@ describe("permisos en el bucle", () => {
 
   it("un deny de lectura oculta el fichero también a Grep", async () => {
     const { ws } = writable({ ".env": "TOKEN=1\n", "notas.txt": "TOKEN=2\n" });
-    const { agent } = runWith(ws, [use("g", "Grep", { pattern: "TOKEN", output_mode: "content" })], { rules: { deny: ["Read(**/.env*)"] } });
+    const { agent } = await runWith(ws, [use("g", "Grep", { pattern: "TOKEN", output_mode: "content" })], { rules: { deny: ["Read(**/.env*)"] } });
     await agent.run("busca");
     expect(resultText(agent)).toContain("notas.txt");
     expect(resultText(agent)).not.toContain(".env:");

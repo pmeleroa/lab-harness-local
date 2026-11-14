@@ -21,9 +21,9 @@ function workspace(files: Record<string, string> = {}) {
   return { ws, outside };
 }
 
-function run(ws: string, turn1: Block[], o: Partial<HarnessOptions> = {}) {
+async function run(ws: string, turn1: Block[], o: Partial<HarnessOptions> = {}) {
   const provider = new FakeProvider((_r, turn) => (turn === 1 ? { content: turn1 } : { content: [text("hecho")] }));
-  const h = createHarness({ workspace: ws, provider, ...o });
+  const h = await createHarness({ workspace: ws, provider, ...o });
   const events: AgentEvent[] = [];
   h.bus.on((e) => events.push(e));
   return { ...h, events };
@@ -43,7 +43,7 @@ const toolResults = (ms: Message[]) => JSON.stringify(ms.at(2));
 describe("approver", () => {
   it("sin terminal, `ask` se convierte en `deny` y el fichero queda intacto", async () => {
     const { ws } = workspace();
-    const { agent, events } = run(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "1", new_string: "2" })]);
+    const { agent, events } = await run(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "1", new_string: "2" })]);
     await agent.run("cambia");
     expect(readFileSync(path.join(ws, "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
     expect(events.some((e) => e.t === "permission_request")).toBe(true);
@@ -53,7 +53,7 @@ describe("approver", () => {
   it("un «sí» ejecuta la herramienta", async () => {
     const { ws } = workspace();
     const { approver, asked } = answers({ kind: "allow_once" });
-    const { agent } = run(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "= 1", new_string: "= 2" })], { approver });
+    const { agent } = await run(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "= 1", new_string: "= 2" })], { approver });
     await agent.run("cambia");
     expect(readFileSync(path.join(ws, "src/a.ts"), "utf8")).toBe("export const a = 2;\n");
     expect(asked).toHaveLength(1);
@@ -63,7 +63,7 @@ describe("approver", () => {
   it("el motivo escrito llega al modelo en el tool_result y no se ejecuta nada", async () => {
     const { ws } = workspace();
     const { approver } = answers({ kind: "deny", feedback: "usa la constante DESCUENTO, no un literal" });
-    const { agent } = run(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "= 1", new_string: "= 2" })], { approver });
+    const { agent } = await run(ws, [use("r", "Read", { file_path: "src/a.ts" }), use("e", "Edit", { file_path: "src/a.ts", old_string: "= 1", new_string: "= 2" })], { approver });
     await agent.run("cambia");
     expect(readFileSync(path.join(ws, "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
     const results = (agent.messages[2]!.content as Block[]).filter((b) => b.type === "tool_result");
@@ -76,7 +76,7 @@ describe("approver", () => {
     writeFileSync(path.join(outside, "uno.txt"), "uno\n");
     writeFileSync(path.join(outside, "dos.txt"), "dos\n");
     const { approver, asked } = answers({ kind: "allow_always", rule: `Read(${outside}/**)` });
-    const { agent } = run(
+    const { agent } = await run(
       ws,
       [use("a", "Read", { file_path: path.join(outside, "uno.txt") }), use("b", "Read", { file_path: path.join(outside, "dos.txt") })],
       { approver },
@@ -90,7 +90,7 @@ describe("approver", () => {
   it("un deny no pregunta nunca, ni en bypass", async () => {
     const { ws } = workspace({ ".env": "TOKEN=1\n" });
     const { approver, asked } = answers({ kind: "allow_once" });
-    const { agent } = run(ws, [use("r", "Read", { file_path: ".env" })], { approver, permissionMode: "bypass", rules: { deny: ["Read(**/.env*)"] } });
+    const { agent } = await run(ws, [use("r", "Read", { file_path: ".env" })], { approver, permissionMode: "bypass", rules: { deny: ["Read(**/.env*)"] } });
     await agent.run("lee");
     expect(asked).toHaveLength(0);
   });

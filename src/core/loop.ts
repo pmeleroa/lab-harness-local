@@ -87,6 +87,8 @@ export interface AgentDeps {
   workspace: string;
   policy: PolicyEngine;
   approver: Approver;
+  /** Avisos de tareas en segundo plano que han terminado: se entregan antes de la siguiente llamada al modelo. */
+  notifications?: { drain(): Block[] };
 }
 
 export interface RunResult {
@@ -168,7 +170,8 @@ export class Agent {
     for (let turn = 1; turn <= this.cfg.maxTurns; turn++) {
       if (signal.aborted) return end("aborted", turn - 1);
 
-      // 1. Modelo
+      // 1. Modelo, con los avisos de tareas en segundo plano entregados
+      this.deliverNotifications();
       this.setState("awaiting_model");
       let assistant: Message;
       let stopReason: StopReason;
@@ -433,7 +436,9 @@ export class Agent {
     let out: ToolResultBlock;
     try {
       const searchable =
-        target.access === "read" ? (p: string) => !this.deps.policy.hidesFromSearch(call.name, p, target.path) : undefined;
+        target.kind === "path" && target.access === "read"
+          ? (p: string) => !this.deps.policy.hidesFromSearch(call.name, p, target.path)
+          : undefined;
       const r = await tool.run(input, {
         workspace: this.deps.workspace,
         signal,
@@ -459,6 +464,12 @@ export class Agent {
       "Answer the user's last message again, with text or with a call to one of those tools.",
       "</system-reminder>",
     ].join("\n");
+  }
+
+  /** Siempre hay un mensaje de usuario al final cuando se llama: el prompt, los tool_result o el aviso de respuesta vacía. */
+  private deliverNotifications(): void {
+    const blocks = this.deps.notifications?.drain() ?? [];
+    if (blocks.length) this.pushUser(blocks);
   }
 
   /** La API exige alternancia: bloques de usuario consecutivos se fusionan en un mensaje. */

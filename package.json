@@ -1,8 +1,8 @@
 {
   "name": "lab-harness-local",
   "private": true,
-  "version": "0.3.0",
-  "description": "Un harness para agentes de código en terminal, construido parte a parte: bucle, contrato de inferencia, contexto y herramientas con permisos",
+  "version": "0.4.0",
+  "description": "Un harness para agentes de código en terminal, construido parte a parte: bucle, contrato de inferencia, contexto, herramientas con permisos y comandos en un sandbox",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -14,6 +14,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "tree-sitter-bash": "^0.25.1",
+    "web-tree-sitter": "^0.27.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {

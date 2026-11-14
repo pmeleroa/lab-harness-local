@@ -1,10 +1,16 @@
 import os from "node:os";
 import path from "node:path";
+import type { Token } from "./bash-parser.js";
 
 /**
- * Sintaxis de reglas de ruta:
+ * Sintaxis de reglas:
+ *   Bash                 cualquier comando
+ *   Bash(git status)     exactamente ese comando
+ *   Bash(git *)          `git` + cero o más argumentos
+ *   Bash(npm run *)      prefijo de tokens + resto
+ *   Bash(git * --force)  `*` intermedio = exactamente un token
  *   Read(src/**)         glob relativo al workspace (o absoluto / con ~)
- *   Edit(**\/*.ts)       aplica a toda escritura de ficheros (Edit y Write)
+ *   Edit(**\/*.ts)       aplica a toda escritura de ficheros (Edit, Write, redirecciones)
  *   Edit                 sin especificador: la herramienta entera
  */
 export interface Rule {
@@ -18,6 +24,25 @@ export function parseRule(raw: string): Rule {
   if (!m) throw new Error(`Invalid permission rule: ${raw}`);
   const specifier = m[2]?.trim();
   return { raw, tool: m[1]!, ...(specifier ? { specifier } : {}) };
+}
+
+/** Patrón de comando contra argv tokenizado. Un literal solo casa con un token literal. */
+export function matchCommand(pattern: string, argv: Token[]): boolean {
+  // Compatibilidad con la sintaxis `npm run test:*`
+  const normalized = pattern.replace(/:\*$/, " *");
+  const pt = normalized.split(/\s+/).filter(Boolean);
+  if (pt.length === 0) return false;
+
+  for (let i = 0; i < pt.length; i++) {
+    const p = pt[i]!;
+    const last = i === pt.length - 1;
+    if (p === "*" && last) return true; // resto, incluido vacío
+    const tok = argv[i];
+    if (!tok) return false;
+    if (p === "*") continue;
+    if (tok.dynamic || tok.value !== p) return false;
+  }
+  return argv.length === pt.length;
 }
 
 export function globToRegExp(glob: string): RegExp {
