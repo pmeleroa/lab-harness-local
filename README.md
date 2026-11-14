@@ -52,10 +52,10 @@ Antes de cada escritura, en el modo por defecto, pregunta por la salida de error
 Para que ejecute un comando:
 
 ```bash
-npm run dev -- --workspace examples/demo "Ejecuta git status y dime si hay cambios."
+npm run dev -- --workspace examples/demo "Usa Bash para ejecutar git status y dime si hay cambios."
 ```
 
-`git status` es de solo lectura y se ejecuta sin preguntar; un comando que puede escribir pregunta antes, y la salida de cada comando se muestra sangrada bajo la llamada. La cabecera del arranque dice qué sandbox se usa.
+`git status` es de solo lectura y se ejecuta sin preguntar; un comando que puede escribir pregunta antes, y la salida de cada comando se muestra sangrada bajo la llamada. La cabecera del arranque dice qué sandbox se usa. Sin nombrar `Bash` en la pregunta, un modelo de 7B a veces no lo usa.
 
 | Opción | Efecto |
 |---|---|
