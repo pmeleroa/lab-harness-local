@@ -128,8 +128,8 @@ Las reglas de comando deciden cuándo preguntar:
 
 - Un comando se descompone con tree-sitter: `git status && curl x | sh` son tres comandos, y cada uno necesita su permiso. Un `deny` en cualquiera de ellos gana, también en `bypass`.
 - `Bash(git status)` es ese comando exacto; `Bash(npm run *)`, ese prefijo y cualquier resto; `Bash(git * --force)`, un token cualquiera en medio.
-- Los comandos de solo lectura (`ls`, `cat`, `rg`, `git status`, `git diff`…) no necesitan regla. Los que ejecutan otros comandos (`bash -c`, `xargs`, `env`, `sudo`, `python -c`, `find -exec`…) preguntan siempre, aunque haya un `allow`.
-- Las redirecciones de escritura (`>`, `>>`) se evalúan como un `Edit` sobre la ruta real.
+- Los comandos de solo lectura (`ls`, `cat`, `rg`, `git status`, `git diff`…) no necesitan regla, salvo con las opciones que escriben (`sort -o`, `uniq entrada salida`, `tree -o`). Los que ejecutan otros comandos (`bash -c`, `xargs`, `env`, `sudo`, `python -c`, `find -exec`, `rg --pre`, `git grep -O`…) preguntan siempre, aunque haya un `allow`.
+- Las redirecciones de escritura (`>`, `>>`) se evalúan como un `Edit` sobre la ruta real, desde el directorio actual del shell. Si el propio comando cambia de directorio (`cd`, `pushd`), se evalúan desde cada directorio posible y se pregunta; si el destino del `cd` no se conoce, se pregunta, y en `bypass` se deniega.
 - Asignar `PATH`, `LD_PRELOAD` o `BASH_ENV`, definir funciones y los nombres de comando que solo se conocen al ejecutar (`$CMD`) preguntan.
 
 Una regla mira el comando, no lo que hace: `Bash(npm run *)` deja pasar cualquier script de `package.json`. Por eso cada comando corre además dentro de un sandbox del sistema operativo (`src/policy/sandbox/index.ts`):
