@@ -142,25 +142,36 @@ function contained(name: string, sandbox: Sandbox, available: boolean) {
       rmSync(base, { recursive: true, force: true });
     });
 
+    // Cada comando empieza con `echo dentro`: si el sandbox no llega a arrancar, todo falla y una prueba de «no se
+    // pudo» pasaría sin demostrar nada.
+    const run = async (command: string) => {
+      const r = await sh.exec(`echo dentro; ${command}`);
+      expect(r.output.split("\n")[0], r.output).toBe("dentro");
+      return r;
+    };
+
     it("escribir en el workspace funciona", async () => {
-      const r = await sh.exec("echo hola > dentro.txt && cat dentro.txt");
-      expect(r).toMatchObject({ exitCode: 0, output: "hola" });
+      const r = await run("echo hola > dentro.txt && cat dentro.txt");
+      expect(r).toMatchObject({ exitCode: 0, output: "dentro\nhola" });
     });
 
     it("escribir fuera falla y el fichero no aparece", async () => {
-      const r = await sh.exec(`echo x > ${outside}/escapado.txt`);
+      const r = await run(`echo x > ${outside}/escapado.txt`);
       expect(r.exitCode).not.toBe(0);
+      expect(r.output).toMatch(/Read-only file system|Operation not permitted/);
       expect(existsSync(path.join(outside, "escapado.txt"))).toBe(false);
     });
 
     it("lo oculto no se puede leer", async () => {
-      const r = await sh.exec(`cat ${secret}/id_falsa`);
+      const r = await run(`cat ${secret}/id_falsa`);
+      expect(r.exitCode).not.toBe(0);
       expect(r.output).not.toContain("CLAVE-FALSA");
     });
 
     it("sin red, una conexión falla", async () => {
-      const r = await sh.exec("curl -s --max-time 5 https://example.com > /dev/null");
+      const r = await run("curl -sS --max-time 5 https://example.com > /dev/null");
       expect(r.exitCode).not.toBe(0);
+      expect(r.output).toMatch(/Could not resolve host|Couldn't connect|resolve/i);
     });
 
     it("fuera del sandbox, el mismo fichero sí se lee (la prueba no es trivial)", () => {
