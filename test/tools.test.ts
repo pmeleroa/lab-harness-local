@@ -2,7 +2,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSyn
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import { BashParser } from "../src/policy/bash-parser.js";
 import { PolicyEngine, type PermissionMode, type RuleSet } from "../src/policy/engine.js";
+import type { PermissionTarget } from "../src/tools/types.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { readTool } from "../src/tools/read.js";
 import { globTool, grepTool } from "../src/tools/search.js";
@@ -12,16 +14,18 @@ import { writeTool } from "../src/tools/write.js";
 
 let workspace: string;
 let outside: string;
+let parser: BashParser;
 
 /** Lo que decide el motor para una llamada: las herramientas ya no rechazan, declaran qué ruta real tocan. */
-function decide(tool: { name: string; permissionTarget: (i: never, c: { workspace: string }) => import("../src/tools/types.js").PermissionTarget }, input: unknown, o: { mode?: PermissionMode; rules?: Partial<RuleSet> } = {}) {
-  const engine = new PolicyEngine({ workspace, mode: o.mode ?? "default", rules: { allow: [], ask: [], deny: [], ...o.rules } });
-  const target = tool.permissionTarget(input as never, { workspace });
+function decide(tool: { name: string; permissionTarget: (i: never, c: { workspace: string }) => PermissionTarget }, input: unknown, o: { mode?: PermissionMode; rules?: Partial<RuleSet> } = {}) {
+  const engine = new PolicyEngine({ workspace, mode: o.mode ?? "default", rules: { allow: [], ask: [], deny: [], ...o.rules } }, parser);
+  const target = tool.permissionTarget(input as never, { workspace }) as Extract<PermissionTarget, { kind: "path" }>;
   return { target, decision: engine.evaluate({ type: "tool_use", id: "x", name: tool.name, input }, target) };
 }
 const ctx = (fileState = new FileStateCache()) => ({ workspace, signal: new AbortController().signal, fileState });
 
-beforeAll(() => {
+beforeAll(async () => {
+  parser = await BashParser.create();
   const base = realpathSync(mkdtempSync(path.join(os.tmpdir(), "lab-tools-")));
   workspace = path.join(base, "ws");
   outside = path.join(base, "secret");
@@ -133,7 +137,7 @@ describe("Grep", () => {
   });
 
   it("`searchable` quita de los resultados lo que una regla de lectura deniega", async () => {
-    const engine = new PolicyEngine({ workspace, mode: "default", rules: { allow: [], ask: [], deny: ["Read(**/a.ts)"] } });
+    const engine = new PolicyEngine({ workspace, mode: "default", rules: { allow: [], ask: [], deny: ["Read(**/a.ts)"] } }, parser);
     const searchable = (p: string) => !engine.hidesFromSearch("Grep", p, workspace);
     const r = await grepTool.run({ pattern: "export const" }, { ...ctx(), searchable });
     expect(r.content).toContain("No matches found");
@@ -325,7 +329,7 @@ describe("Edit y Write: read-before-edit", () => {
   });
 
   it("una regla de sesión («siempre») evita volver a preguntar", () => {
-    const engine = new PolicyEngine({ workspace, mode: "default", rules: { allow: [], ask: [], deny: [] } });
+    const engine = new PolicyEngine({ workspace, mode: "default", rules: { allow: [], ask: [], deny: [] } }, parser);
     const target = editTool.permissionTarget({ file_path: "src/a.ts", old_string: "a", new_string: "b" }, { workspace });
     const call = { type: "tool_use" as const, id: "x", name: "Edit", input: {} };
     expect(engine.evaluate(call, target).kind).toBe("ask");

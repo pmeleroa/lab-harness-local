@@ -433,7 +433,9 @@ export class Agent {
     let out: ToolResultBlock;
     try {
       const searchable =
-        target.access === "read" ? (p: string) => !this.deps.policy.hidesFromSearch(call.name, p, target.path) : undefined;
+        target.kind === "path" && target.access === "read"
+          ? (p: string) => !this.deps.policy.hidesFromSearch(call.name, p, target.path)
+          : undefined;
       const r = await tool.run(input, {
         workspace: this.deps.workspace,
         signal,

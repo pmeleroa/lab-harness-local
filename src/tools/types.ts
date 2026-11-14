@@ -22,12 +22,14 @@ export interface ToolOutput {
   isError?: boolean;
 }
 
-/** Lo que el motor de permisos necesita saber de una llamada: qué ruta real toca y si lee o escribe. */
-export interface PermissionTarget {
-  kind: "path";
-  path: string;
-  access: "read" | "write";
-}
+/**
+ * Lo que el motor de permisos necesita saber de una llamada: qué ruta real toca y si lee o escribe, qué comando
+ * ejecuta, o qué tarea en segundo plano propia consulta o para.
+ */
+export type PermissionTarget =
+  | { kind: "path"; path: string; access: "read" | "write" }
+  | { kind: "command"; command: string }
+  | { kind: "task"; id: string };
 
 export interface Tool<S extends z.ZodType = z.ZodType> {
   name: string;

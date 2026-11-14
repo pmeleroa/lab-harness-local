@@ -75,7 +75,7 @@ const canAsk = !!process.stdin.isTTY && !!process.stderr.isTTY;
 const rl = canAsk ? readline.createInterface({ input: process.stdin, output: process.stderr, terminal: true }) : null;
 const approver: Approver = rl ? ttyApprover(rl) : denyAllApprover;
 
-const { agent, bus, workspace, model, policy, warnings } = createHarness({
+const { agent, bus, workspace, model, policy, warnings } = await createHarness({
   ...(permissionMode ? { permissionMode } : {}),
   rules: {
     allow: [...settings.rules.allow, ...values.allow],

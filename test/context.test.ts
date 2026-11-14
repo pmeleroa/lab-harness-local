@@ -20,9 +20,9 @@ function workspace(files: Record<string, string> = {}): string {
 }
 
 /** Ventana de 20k con 4k de respuesta: 16k útiles (clearing a 9,6k, compaction a 13,6k). */
-function setup(script: Script, o: { files?: Record<string, string>; config?: Record<string, unknown>; truncate?: { window: number; mode?: "collapse" | "plateau" } } = {}) {
+async function setup(script: Script, o: { files?: Record<string, string>; config?: Record<string, unknown>; truncate?: { window: number; mode?: "collapse" | "plateau" } } = {}) {
   const provider = new FakeProvider(script, o.truncate ? { truncate: o.truncate } : {});
-  const h = createHarness({
+  const h = await createHarness({
     workspace: workspace(o.files),
     provider,
     config: { contextWindow: 20_000, maxTokens: 4_000, ...o.config },
@@ -50,7 +50,7 @@ describe("escalón 1: tope por resultado", () => {
   });
 
   it("un resultado nunca ocupa más del 20 % del espacio útil", async () => {
-    const { agent, provider } = setup(
+    const { agent, provider } = await setup(
       (_r, turn) => (turn === 1 ? { content: [use("t1", "Read", { file_path: "big.txt" })] } : { content: [text("ok")] }),
       { files: { "big.txt": bigFile(8_000) } },
     );
@@ -65,7 +65,7 @@ describe("escalón 1: tope por resultado", () => {
 describe("escalón 2: limpiar resultados antiguos", () => {
   it("al pasar de clearAt sustituye los antiguos por una nota y la conversación guardada sigue completa", async () => {
     const files = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`f${i}.txt`, bigFile(2_500)]));
-    const { agent, provider, events } = setup(
+    const { agent, provider, events } = await setup(
       (_r, turn) => (turn <= 5 ? { content: [use(`t${turn}`, "Read", { file_path: `f${turn - 1}.txt` })] } : { content: [text("ok")] }),
       { files, config: { context: { maxToolResultTokens: 25_000, clearAt: 0.6, compactAt: 0.95, keepToolResults: 2 } } },
     );
@@ -87,7 +87,7 @@ describe("escalón 3: compactar", () => {
       if (JSON.stringify(req.messages).includes("conversation_summary") || reads >= 3) return { content: [text("hecho")] };
       return { content: [use(`r${reads}`, "Read", { file_path: `${"abc"[reads]}.txt` })] };
     };
-    const { agent, events } = setup(script, { files, config: { context: { maxToolResultTokens: 25_000, clearAt: 0.99, compactAt: 0.5, keepToolResults: 6 } } });
+    const { agent, events } = await setup(script, { files, config: { context: { maxToolResultTokens: 25_000, clearAt: 0.99, compactAt: 0.5, keepToolResults: 6 } } });
     await agent.run("lee a, b y c");
     expect(events.some((e) => e.t === "context" && e.action === "compacted")).toBe(true);
     expect(JSON.stringify(agent.messages[0])).toContain("Leídos a, b y c.");
@@ -103,7 +103,7 @@ describe("escalón 3: compactar", () => {
   });
 
   it("compact() deja la historia intacta si el resumen acaba por max_tokens", async () => {
-    const s = setup(
+    const s = await setup(
       (req, turn) => {
         if (isSummaryRequest(req)) return { content: [text("<summary>1. Objetivo: arre")], stopReason: "max_tokens" };
         return turn === 1 ? { content: [use("t1", "Read", { file_path: "a.txt" })] } : { content: [text("hecho")] };
@@ -123,14 +123,14 @@ describe("reserva de respuesta proporcional a la ventana", () => {
     [16_000, 4_000],
     [32_768, 8_192],
   ])("con ventana %i reserva %i y la envía como max_tokens", async (contextWindow, expected) => {
-    const { agent, provider } = setup(() => ({ content: [text("ok")] }), { config: { contextWindow, maxTokens: 16_000 } });
+    const { agent, provider } = await setup(() => ({ content: [text("ok")] }), { config: { contextWindow, maxTokens: 16_000 } });
     await agent.run("hola");
     expect(agent.reserve).toBe(expected);
     expect(provider.requests[0]!.maxTokens).toBe(expected);
   });
 
   it("con una ventana grande sigue valiendo maxTokens", async () => {
-    const { agent } = setup(() => ({ content: [text("ok")] }), { config: { contextWindow: 200_000, maxTokens: 4_096 } });
+    const { agent } = await setup(() => ({ content: [text("ok")] }), { config: { contextWindow: 200_000, maxTokens: 4_096 } });
     expect(agent.reserve).toBe(4_096);
   });
 });
@@ -147,7 +147,7 @@ describe("final: context_overflow", () => {
   /** El agente cree tener 100k (mal configurada) y el servidor simulado recorta a 4.096 (más `base`); la petición base ronda 500 tokens. */
   async function overflow(fileTokens: number, reads: number, mode: "collapse" | "plateau", base = 0) {
     const files = Object.fromEntries(Array.from({ length: reads }, (_, i) => [`f${i}.txt`, bigFile(fileTokens)]));
-    const s = setup(
+    const s = await setup(
       (_r, turn) => (turn <= reads ? { content: [use(`t${turn}`, "Read", { file_path: `f${turn - 1}.txt` })] } : { content: [text("hecho")] }),
       { files, config: { contextWindow: 100_000, maxTokens: 4_096 }, truncate: { window: 4_096 + base, mode } },
     );
@@ -184,7 +184,7 @@ describe("final: context_overflow", () => {
 
   it("compact() falla y la historia queda intacta si el servidor recorta su petición", async () => {
     const dir = ["a.txt", "b.txt"];
-    const s = setup(
+    const s = await setup(
       (req, turn) => {
         if (isSummaryRequest(req)) return { content: [text("<summary>Leídos a y b.</summary>")] };
         return turn <= 2 ? { content: [use(`t${turn}`, "Read", { file_path: dir[turn - 1]! })] } : { content: [text("hecho")] };
@@ -235,7 +235,7 @@ describe("instrucciones del proyecto (AGENTS.md)", () => {
   const policy = { context: { maxToolResultTokens: 25_000, clearAt: 0.99, compactAt: 0.5, keepToolResults: 6 } };
 
   it("su contenido sigue en la petición tras compactar", async () => {
-    const { agent, provider, events } = setup(script, { files: { ...files, "AGENTS.md": "Responde siempre en español.\n" }, config: policy });
+    const { agent, provider, events } = await setup(script, { files: { ...files, "AGENTS.md": "Responde siempre en español.\n" }, config: policy });
     await agent.run("lee a, b y c");
     expect(events.some((e) => e.t === "context" && e.action === "compacted")).toBe(true);
     const system = (r: { system: { text: string }[] }) => r.system.map((p) => p.text).join("\n");
@@ -247,7 +247,7 @@ describe("instrucciones del proyecto (AGENTS.md)", () => {
 
   it("el run funciona sin el fichero, y con uno vacío", async () => {
     for (const extra of [{} as Record<string, string>, { "AGENTS.md": "  \n" }]) {
-      const { agent, provider } = setup(script, { files: { ...files, ...extra }, config: policy });
+      const { agent, provider } = await setup(script, { files: { ...files, ...extra }, config: policy });
       expect((await agent.run("lee a, b y c")).reason).toBe("end_turn");
       expect(provider.requests[0]!.system.map((p) => p.text).join("\n")).not.toContain("Project instructions");
     }

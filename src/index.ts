@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { Agent, type AgentConfig, type Approver, defaultAgentConfig, denyAllApprover } from "./core/loop.js";
+import { BashParser } from "./policy/bash-parser.js";
 import { type PermissionMode, PolicyEngine, type RuleSet, emptyRules } from "./policy/engine.js";
 import { EventBus } from "./core/events.js";
 import { loadInstructions } from "./context/instructions.js";
@@ -52,7 +53,7 @@ export const SYSTEM_PROMPT = [
   "how to proceed. Do not guess file contents. When you are done, answer concisely.",
 ].join("\n");
 
-export function createHarness(o: HarnessOptions = {}): Harness {
+export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   const resolved = path.resolve(o.workspace ?? process.cwd());
   // El motor compara rutas ya resueltas con `realpath`, así que el workspace también lo está.
   const workspace = realpathSync(resolved);
@@ -71,7 +72,7 @@ export function createHarness(o: HarnessOptions = {}): Harness {
     workspace,
     mode: o.permissionMode ?? "default",
     rules: { ...emptyRules(), ...o.rules },
-  });
+  }, await BashParser.create());
   const bus = new EventBus();
   const instructions = loadInstructions(workspace);
   const system = [{ text: `${SYSTEM_PROMPT}\nWorkspace: ${workspace}` }, ...(instructions ? [{ text: instructions }] : [])];
