@@ -169,7 +169,7 @@ function contained(name: string, sandbox: Sandbox, available: boolean) {
     });
 
     it("sin red, una conexión falla", async () => {
-      const r = await run("curl -sS --max-time 5 https://example.com > /dev/null");
+      const r = await run("curl -sS --max-time 5 https://example.org > /dev/null");
       expect(r.exitCode).not.toBe(0);
       expect(r.output).toMatch(/Could not resolve host|Couldn't connect|resolve/i);
     });
