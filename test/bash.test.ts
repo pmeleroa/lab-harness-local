@@ -68,7 +68,7 @@ describe("BashSession", () => {
   });
 
   it("no filtra secretos del entorno al proceso hijo", async () => {
-    process.env.FAKE_API_KEY = "sk-falsa";
+    process.env.FAKE_API_KEY = "valor-falso";
     const r = await sh.exec('echo "[$FAKE_API_KEY]"');
     delete process.env.FAKE_API_KEY;
     expect(r.output).toBe("[]");
