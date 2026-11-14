@@ -165,7 +165,7 @@ bus.on((e: AgentEvent) => {
   atLineStart = true;
 });
 
-process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\nsandbox: ${bash.sandboxName}${network === "none" ? ", sin red" : ""}\n`);
+process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\nsandbox: ${bash.sandboxName}${network !== "none" ? "" : bash.sandboxName === "none" ? " (--no-network no tiene efecto sin sandbox)" : ", sin red"}\n`);
 for (const w of settings.warnings) process.stderr.write(`! ${w}\n`);
 for (const w of warnings) process.stderr.write(`! ${w}\n`);
 process.stderr.write("\n");
