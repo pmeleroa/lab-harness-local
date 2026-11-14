@@ -114,6 +114,45 @@ describe("Redirecciones = escrituras de fichero", () => {
   });
 });
 
+describe("Redirecciones desde el directorio del shell", () => {
+  const at = (e: PolicyEngine, command: string, cwd: string) =>
+    e.evaluate(call("Bash", { command }), { kind: "command", command, cwd });
+  const protect = (mode: PermissionMode = "acceptEdits") => engine({ deny: ["Edit(sub/protected.txt)"] }, mode);
+
+  it("una ruta relativa se evalúa desde el cwd del shell, no desde la raíz del workspace", () => {
+    expect(at(protect(), "echo x > protected.txt", `${WS}/sub`).kind).toBe("deny");
+    expect(at(protect(), "echo x > protected.txt", WS).kind).toBe("allow");
+  });
+
+  it("tras un cd del propio script, se evalúa desde cada directorio y se pregunta", () => {
+    expect(at(protect(), "cd sub && echo x > protected.txt", WS).kind).toBe("deny");
+    expect(at(protect("bypass"), "cd sub; echo x > protected.txt", WS).kind).toBe("deny");
+    expect(at(engine({ allow: ["Bash(pushd *)"] }, "acceptEdits"), "pushd sub && echo x > otro.txt", WS)).toMatchObject({ kind: "ask", reason: expect.stringMatching(/after a directory change/) });
+    expect(at(protect(), "cd .. && cd sub && echo x > protected.txt", `${WS}/sub`).kind).toBe("deny");
+  });
+
+  it("un cd a un destino que no se conoce pregunta, y en bypass se deniega", () => {
+    for (const cd of ["cd $DIR", "cd", "cd -", "popd"]) {
+      expect(at(protect(), `${cd} && echo x > protected.txt`, WS).kind, cd).toBe("ask");
+      expect(at(protect("bypass"), `${cd} && echo x > protected.txt`, WS).kind, cd).toBe("deny");
+    }
+  });
+
+  it("una ruta absoluta no depende del directorio", () => {
+    expect(at(protect(), `cd $DIR && echo x > ${WS}/sub/protected.txt`, WS).kind).toBe("deny");
+  });
+});
+
+describe("Comandos de solo lectura que ejecutan otros programas", () => {
+  it("rg --pre y sort --compress-program preguntan, aunque haya allow", () => {
+    const e = engine({ allow: ["Bash(rg *)", "Bash(sort *)"] });
+    for (const c of ["rg --pre ./script needle input.txt", "rg --pre=./script needle input.txt", "sort --compress-program=./x big.txt"])
+      expect(bash(e, c).kind, c).toBe("ask");
+    expect(bash(engine(), "rg --pre-glob '*.pdf' needle").kind).toBe("allow");
+    expect(bash(engine(), "rg needle src").kind).toBe("allow");
+  });
+});
+
 describe("Reglas sugeridas", () => {
   it("generaliza a subcomando + *", () => {
     const e = engine();

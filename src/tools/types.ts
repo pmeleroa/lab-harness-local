@@ -28,7 +28,8 @@ export interface ToolOutput {
  */
 export type PermissionTarget =
   | { kind: "path"; path: string; access: "read" | "write" }
-  | { kind: "command"; command: string }
+  /** `cwd`: directorio del shell en el que se ejecutará; las rutas relativas del comando se resuelven desde ahí. */
+  | { kind: "command"; command: string; cwd?: string }
   | { kind: "task"; id: string };
 
 export interface Tool<S extends z.ZodType = z.ZodType> {

@@ -344,7 +344,8 @@ export function createBashTool(session: BashSession, shells?: BackgroundShells) 
     // Sin shells, el campo ni aparece: zod descarta las claves desconocidas.
     schema: (shells ? full : base) as typeof full,
     readOnly: false,
-    permissionTarget: (input) => ({ kind: "command", command: input.command }),
+    // El cwd persiste entre llamadas: una redirección relativa escribe desde ahí, no desde la raíz del workspace.
+    permissionTarget: (input) => ({ kind: "command", command: input.command, cwd: session.cwd }),
 
     async run(input, ctx) {
       if (input.run_in_background && shells) {

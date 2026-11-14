@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -230,6 +230,31 @@ describe("Bash en el bucle", () => {
     });
     await h.agent.run("commit");
     expect(suggested).toEqual(["Bash(git commit *)"]);
+  });
+
+  it("tras un cd aprobado, una redirección relativa se evalúa desde el directorio nuevo", async () => {
+    const { h } = await harness(
+      (_r, turn) =>
+        turn === 1
+          ? { content: [use("a", "Bash", { command: "cd sub" })] }
+          : turn === 2
+            ? { content: [use("b", "Bash", { command: "echo changed > protected.txt" })] }
+            : { content: [text("hecho")] },
+      { permissionMode: "acceptEdits", rules: { deny: ["Edit(sub/protected.txt)"] }, approver: async () => ({ kind: "allow_once" }) },
+    );
+    mkdirSync(path.join(h.workspace, "sub"));
+    writeFileSync(path.join(h.workspace, "sub", "protected.txt"), "original\n");
+    await h.agent.run("cambia");
+    expect(h.bash.cwd).toBe(path.join(h.workspace, "sub"));
+    expect(readFileSync(path.join(h.workspace, "sub", "protected.txt"), "utf8")).toBe("original\n");
+  });
+
+  it("rg --pre no se ejecuta sin aprobación", async () => {
+    const { h } = await harness(once([use("a", "Bash", { command: "rg --pre ./script needle input.txt" })]));
+    writeFileSync(path.join(h.workspace, "input.txt"), "needle\n");
+    writeFileSync(path.join(h.workspace, "script"), '#!/bin/sh\ntouch pwned\ncat "$1"\n', { mode: 0o755 });
+    await h.agent.run("busca");
+    expect(existsSync(path.join(h.workspace, "pwned"))).toBe(false);
   });
 
   it("una regla deny bloquea también el modo background", async () => {

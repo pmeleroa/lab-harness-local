@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { ToolUseBlock } from "../providers/canonical.js";
 import type { PermissionTarget } from "../tools/types.js";
 import { isInside, resolveReal } from "../tools/types.js";
@@ -128,7 +129,7 @@ export class PolicyEngine {
       case "path":
         return this.evaluatePath(call.name, target.path, target.access);
       case "command":
-        return this.evaluateCommand(call.name, target.command);
+        return this.evaluateCommand(call.name, target.command, target.cwd ?? this.cfg.workspace);
       case "task":
         return this.byRules((r) => r.tool === call.name && !r.specifier) ?? { kind: "allow", reason: "own background task" };
     }
@@ -149,7 +150,7 @@ export class PolicyEngine {
     return { kind: "ask", reason: `write ${absPath}` };
   }
 
-  private evaluateCommand(toolName: string, command: string): Decision {
+  private evaluateCommand(toolName: string, command: string, cwd: string): Decision {
     const parsed = this.bash.parse(command);
     let ask: string | null = parsed.problems[0] ?? null;
 
@@ -175,15 +176,28 @@ export class PolicyEngine {
       ask ??= `run: ${c.text}`;
     }
 
-    // 3. Las redirecciones son escrituras de fichero: se evalúan como Edit, sobre la ruta real.
+    // 3. Las redirecciones son escrituras de fichero: se evalúan como Edit, sobre la ruta real, desde el directorio
+    // del shell. Si el script cambia de directorio, una ruta relativa puede escribir desde cualquiera de ellos: se
+    // evalúa desde todos los que se conocen, y siempre se pregunta.
+    const dirs = scriptDirs(parsed.commands, cwd);
     for (const w of parsed.writes) {
       if (w.dynamic) {
         ask ??= `redirect to dynamic path: ${w.value}`;
         continue;
       }
-      const d = this.evaluatePath("Edit", resolveReal(this.cfg.workspace, w.value), "write");
-      if (d.kind === "deny") return d;
-      if (d.kind === "ask") ask ??= `redirect writes ${w.value}`;
+      const relative = !path.isAbsolute(w.value);
+      if (relative && dirs.unknown) {
+        // No se puede saber qué fichero es, así que ningún deny se puede comprobar: en bypass no basta con preguntar.
+        const reason = `redirect ${w.value} after a directory change to an unknown path`;
+        if (this.cfg.mode === "bypass") return { kind: "deny", reason };
+        ask ??= reason;
+      }
+      for (const dir of relative ? dirs.known : [cwd]) {
+        const d = this.evaluatePath("Edit", resolveReal(dir, w.value), "write");
+        if (d.kind === "deny") return d;
+        if (d.kind === "ask") ask ??= `redirect writes ${w.value}`;
+      }
+      if (relative && dirs.known.length > 1) ask ??= `redirect ${w.value} after a directory change`;
     }
 
     if (parsed.commands.length === 0 && !ask) return { kind: "allow", reason: "no commands" };
@@ -214,7 +228,34 @@ export function opaqueReason(argv: Token[]): string | null {
   if (INTERPRETERS.has(base) && args.some((a) => INLINE_CODE_FLAGS.has(a))) return `${base} runs inline code`;
   if (base === "find" && args.some((a) => FIND_EXEC_FLAGS.has(a))) return "find with -exec/-delete";
   if (base === "git" && args.some((a) => a === "-c" || a.startsWith("--config-env"))) return "git with inline config";
+  // rg --pre ejecuta un programa por cada fichero que busca; sort --compress-program, uno para sus temporales.
+  if (base === "rg" && args.some((a) => a === "--pre" || a.startsWith("--pre="))) return "rg with --pre runs a command";
+  if (base === "sort" && args.some((a) => a.startsWith("--compress-program"))) return "sort with --compress-program runs a command";
   return null;
+}
+
+/** Comandos que cambian el directorio del shell. */
+const DIR_CHANGE_COMMANDS = new Set(["cd", "pushd", "popd"]);
+
+/**
+ * Directorios desde los que puede escribir una ruta relativa del script: el cwd del shell y, en orden, el destino de
+ * cada `cd`/`pushd` con un argumento literal. Uno sin argumento (el home), `cd -`, `popd` o un destino dinámico dejan
+ * el directorio sin determinar (`unknown`). Es conservador: no distingue subshells ni ramas de un `if`.
+ */
+export function scriptDirs(commands: SimpleCommand[], cwd: string): { known: string[]; unknown: boolean } {
+  const known = [cwd];
+  let unknown = false;
+  for (const c of commands) {
+    const name = c.argv[0];
+    if (!name || name.dynamic || !DIR_CHANGE_COMMANDS.has(name.value)) continue;
+    const arg = c.argv.slice(1).find((t) => t.dynamic || !t.value.startsWith("-") || t.value === "-");
+    if (name.value === "popd" || !arg || arg.dynamic || arg.value === "-") {
+      unknown = true;
+      continue;
+    }
+    known.push(path.resolve(known.at(-1)!, arg.value));
+  }
+  return { known, unknown };
 }
 
 export function isReadOnly(argv: Token[]): boolean {
