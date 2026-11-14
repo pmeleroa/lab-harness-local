@@ -151,6 +151,18 @@ describe("Comandos de solo lectura que ejecutan otros programas", () => {
     expect(bash(engine(), "rg --pre-glob '*.pdf' needle").kind).toBe("allow");
     expect(bash(engine(), "rg needle src").kind).toBe("allow");
   });
+
+  it("git grep -O preguntan, aunque haya allow", () => {
+    const e = engine({ allow: ["Bash(git *)"] });
+    for (const c of ["git grep -O./script needle", "git grep -O needle", "git grep --open-files-in-pager=vim needle"]) expect(bash(e, c).kind, c).toBe("ask");
+    expect(bash(engine(), "git grep needle").kind).toBe("allow");
+  });
+
+  it("uniq con fichero de salida y tree -o escriben: no son de solo lectura", () => {
+    const e = engine();
+    for (const c of ["uniq in.txt out.txt", "uniq -c in.txt out.txt", "tree -o out.txt", "tree -ao out.txt"]) expect(bash(e, c).kind, c).toBe("ask");
+    for (const c of ["uniq in.txt", "uniq -c in.txt", "sort in.txt | uniq", "tree -L 2 src"]) expect(bash(e, c).kind, c).toBe("allow");
+  });
 });
 
 describe("Reglas sugeridas", () => {

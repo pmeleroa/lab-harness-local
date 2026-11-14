@@ -231,6 +231,9 @@ export function opaqueReason(argv: Token[]): string | null {
   // rg --pre ejecuta un programa por cada fichero que busca; sort --compress-program, uno para sus temporales.
   if (base === "rg" && args.some((a) => a === "--pre" || a.startsWith("--pre="))) return "rg with --pre runs a command";
   if (base === "sort" && args.some((a) => a.startsWith("--compress-program"))) return "sort with --compress-program runs a command";
+  // git grep -O abre los ficheros encontrados con el programa que se le pase (o el paginador).
+  if (base === "git" && args.includes("grep") && args.some((a) => a.startsWith("-O") || a.startsWith("--open-files-in-pager")))
+    return "git grep with --open-files-in-pager runs a command";
   return null;
 }
 
@@ -268,5 +271,9 @@ export function isReadOnly(argv: Token[]): boolean {
   }
   if (!READ_ONLY_COMMANDS.has(name)) return false;
   if (name === "sort" && args.some((a) => a === "-o" || a.startsWith("--output"))) return false;
+  // `uniq entrada salida` escribe en su segundo fichero; `tree -o fichero`, en ese fichero. Se cuentan como argumentos
+  // todos los que no empiezan por `-`, también el valor de una opción: mejor preguntar de más.
+  if (name === "uniq" && args.filter((a) => !a.startsWith("-")).length >= 2) return false;
+  if (name === "tree" && args.some((a) => /^-[^-]*o/.test(a))) return false;
   return true;
 }
