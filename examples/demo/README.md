@@ -5,4 +5,5 @@ Carrito de la compra de juguete para probar el harness: leerlo, buscar en él y 
 - `src/pricing.ts`: precios e impuestos.
 - `src/cart.ts`: el carrito y el total del pedido.
 - `test/pricing.test.ts`: pruebas de `pricing.ts`.
+- No tiene `package.json`: la demo del sandbox crea uno con un script `build` que lee una credencial de mentira, escribe fuera del workspace y hace una petición (ver «Comandos y sandbox» en el README del repositorio). Bórralo al terminar.
 - `.harness/settings.json`: reglas de permisos del demo. Deniegan leer y editar cualquier `.env*` y editar la propia configuración, para que el agente no pueda ampliarse los permisos en el siguiente run. No hay ningún `deny` implícito: lo que no esté aquí no se deniega.
