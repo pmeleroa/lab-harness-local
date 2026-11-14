@@ -3,6 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { PermissionMode, RuleSet } from "./engine.js";
 import { parseRule } from "./rules.js";
+import type { SandboxChoice } from "./sandbox/index.js";
 
 const SettingsSchema = z.object({
   permissions: z
@@ -13,11 +14,18 @@ const SettingsSchema = z.object({
       defaultMode: z.enum(["default", "acceptEdits", "bypass"]).optional(),
     })
     .default({ allow: [], ask: [], deny: [] }),
+  sandbox: z
+    .object({
+      mode: z.enum(["auto", "bwrap", "seatbelt", "none"]).optional(),
+      network: z.enum(["none", "host"]).optional(),
+    })
+    .optional(),
 });
 
 export interface LoadedSettings {
   rules: RuleSet;
   mode?: PermissionMode;
+  sandbox: { mode?: SandboxChoice; network?: "none" | "host" };
   warnings: string[];
   file?: string;
 }
@@ -25,12 +33,13 @@ export interface LoadedSettings {
 export const settingsFile = (workspace: string) => path.join(workspace, ".harness", "settings.json");
 
 /**
- * Lee el bloque `permissions` de `<workspace>/.harness/settings.json`. No hay ningún `deny` implícito: lo que no
- * esté escrito aquí o en `--deny` no se deniega. Un repositorio no puede ponerse a sí mismo en `bypass`: ese modo
- * solo se activa con `--permission-mode`.
+ * Lee los bloques `permissions` y `sandbox` de `<workspace>/.harness/settings.json`. No hay ningún `deny` implícito:
+ * lo que no esté escrito aquí o en `--deny` no se deniega. Un repositorio no puede escalarse a sí mismo: ni ponerse
+ * en `bypass` (solo con `--permission-mode`), ni desactivar el sandbox (solo con `--sandbox none`), ni abrir la red
+ * (puede cortarla, nunca abrirla).
  */
 export function loadSettings(workspace: string): LoadedSettings {
-  const out: LoadedSettings = { rules: { allow: [], ask: [], deny: [] }, warnings: [] };
+  const out: LoadedSettings = { rules: { allow: [], ask: [], deny: [] }, sandbox: {}, warnings: [] };
   const file = settingsFile(workspace);
   let raw: string;
   try {
@@ -46,7 +55,13 @@ export function loadSettings(workspace: string): LoadedSettings {
   out.rules = { allow: p.allow, ask: p.ask, deny: p.deny };
   if (p.defaultMode === "bypass") out.warnings.push(`Ignored defaultMode "bypass" from ${file}: use --permission-mode bypass.`);
   else if (p.defaultMode) out.mode = p.defaultMode;
+  const sb = parsed.data.sandbox;
+  if (sb?.mode === "none") out.warnings.push(`Ignored sandbox.mode "none" from ${file}: use --sandbox none.`);
+  else if (sb?.mode) out.sandbox.mode = sb.mode;
+  // Un proyecto puede restringir la red, no abrirla.
+  if (sb?.network === "none") out.sandbox.network = "none";
   return out;
 }
 
 export const PERMISSION_MODES = new Set<string>(["default", "acceptEdits", "bypass"]);
+export const SANDBOX_CHOICES = new Set<string>(["auto", "bwrap", "seatbelt", "none"]);

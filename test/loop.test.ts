@@ -180,7 +180,7 @@ describe("herramientas que fallan no rompen el bucle", () => {
   it("input inválido y herramienta inexistente vuelven al modelo como error", async () => {
     const { agent } = await setup((_req, turn) =>
       turn === 1
-        ? { content: [use("c1", "Read", { file_path: 42 }), use("c2", "Bash", { command: "ls" })] }
+        ? { content: [use("c1", "Read", { file_path: 42 }), use("c2", "WebFetch", { url: "https://example.com" })] }
         : { content: [text("vale")] },
     );
     const r = await agent.run("lee");
@@ -190,7 +190,7 @@ describe("herramientas que fallan no rompen el bucle", () => {
     expect(results[0]).toMatchObject({ tool_use_id: "c1", is_error: true });
     expect(JSON.stringify(results[0])).toContain("Invalid input for Read");
     expect(results[1]).toMatchObject({ tool_use_id: "c2", is_error: true });
-    expect(JSON.stringify(results[1])).toContain("Unknown tool: Bash");
+    expect(JSON.stringify(results[1])).toContain("Unknown tool: WebFetch");
     expectEveryCallAnswered(agent.messages);
   });
 

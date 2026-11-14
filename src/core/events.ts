@@ -1,4 +1,5 @@
 import type { ToolResultBlock, ToolUseBlock, Usage } from "../providers/canonical.js";
+import type { TaskKind, TaskStatus } from "./background.js";
 
 export type AgentState = "idle" | "awaiting_model" | "executing_tools" | "done" | "aborted" | "error";
 
@@ -20,6 +21,8 @@ export type AgentEvent =
   /** El loop liberó contexto: limpió `count` tool_results antiguos o compactó la conversación. En tokens. */
   | { t: "context"; action: "cleared" | "compacted"; before: number; after: number; count?: number }
   | { t: "warning"; message: string }
+  | { t: "task_start"; id: string; kind: TaskKind; description: string }
+  | { t: "task_end"; id: string; kind: TaskKind; status: TaskStatus; durationMs: number; summary: string; exitCode?: number | null }
   | { t: "run_end"; reason: RunEndReason; usage: Usage; turns: number };
 
 export type RunEndReason =
