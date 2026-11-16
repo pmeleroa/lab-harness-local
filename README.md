@@ -2,7 +2,7 @@
 
 Un harness para agentes de código en terminal, construido parte a parte para entender cómo funcionan estos agentes por dentro. Acompaña a la serie «Asistente de código local» de [pablomeleroalonso.me](https://pablomeleroalonso.me).
 
-Esta versión (tag `parte-5`) ya **ejecuta comandos**: un bucle con streaming, un contrato de inferencia con un adaptador a `/v1/chat/completions`, gestión del contexto (limpiar y compactar contra la ventana, y detectar cuando el servidor recorta la conversación sin avisar), herramientas para leer, buscar y escribir (`Read`, `Glob`, `Grep`, `Write` y `Edit`), `Bash` con procesos en segundo plano (`BashOutput` y `KillShell`), un sistema de permisos con reglas de ruta y de comando, y un sandbox del sistema operativo alrededor de cada comando. Las reglas deciden cuándo preguntar; el sandbox, qué puede pasar aunque una regla se equivoque. Cada parte de la serie añade commits y un tag nuevo.
+Esta versión (tag `parte-6`) ya **se puede ampliar sin tocar su código**: un bucle con streaming, un contrato de inferencia con un adaptador a `/v1/chat/completions`, gestión del contexto (limpiar y compactar contra la ventana, y detectar cuando el servidor recorta la conversación sin avisar), herramientas para leer, buscar y escribir (`Read`, `Glob`, `Grep`, `Write` y `Edit`), `Bash` con procesos en segundo plano (`BashOutput` y `KillShell`), un sistema de permisos con reglas de ruta y de comando, un sandbox del sistema operativo alrededor de cada comando y, nuevo en esta parte, tres formas de extenderlo: skills (procedimientos que el modelo carga cuando los necesita), hooks (comandos que el harness ejecuta antes o después de cada herramienta) y servidores MCP por stdio (herramientas de otro proceso). Todo proceso que lanza el harness, sea `Bash`, un hook o un servidor MCP, corre dentro del mismo sandbox. Cada parte de la serie añade commits y un tag nuevo.
 
 | Tag | Qué añade |
 |---|---|
@@ -10,6 +10,7 @@ Esta versión (tag `parte-5`) ya **ejecuta comandos**: un bucle con streaming, u
 | `parte-3` | La gestión del contexto y la detección de recortes del servidor. |
 | `parte-4` | `Write`, `Edit` y los permisos de ruta. |
 | `parte-5` | `Bash`, las reglas de comando y el sandbox. |
+| `parte-6` | Skills, hooks y servidores MCP por stdio, dentro del sandbox. |
 
 ## Prerrequisitos
 
@@ -17,6 +18,7 @@ Esta versión (tag `parte-5`) ya **ejecuta comandos**: un bucle con streaming, u
 - Node.js 22 o superior y npm.
 - [ripgrep](https://github.com/BurntSushi/ripgrep#installation) (`rg`) en el `PATH`: lo usan `Glob` y `Grep`.
 - En Linux (y WSL2), [bubblewrap](https://github.com/containers/bubblewrap) para el sandbox: `sudo apt install bubblewrap` en Debian y Ubuntu. En macOS se usa `sandbox-exec`, que viene con el sistema.
+- Para el ejemplo de MCP, el binario de [github-mcp-server](https://github.com/github/github-mcp-server) y un token de GitHub (ver «Extensibilidad»).
 - Un servidor compatible con `/v1/chat/completions` con un modelo que admita herramientas. Los ejemplos usan [Ollama](https://ollama.com) y `qwen2.5:7b`.
 
 ```bash
@@ -26,7 +28,7 @@ ollama pull qwen2.5:7b
 ## Instalación
 
 ```bash
-git clone --branch parte-5 https://github.com/pmeleroa/lab-harness-local.git
+git clone --branch parte-6 https://github.com/pmeleroa/lab-harness-local.git
 cd lab-harness-local
 npm install
 npm test
@@ -166,19 +168,66 @@ Con `run_in_background`, `Bash` lanza el comando y vuelve al momento con un id: 
 
 Lo que no hace: el sandbox no entiende el contenido. Dentro del workspace, un comando aprobado puede borrar o reescribir lo que quiera, y con red puede enviar lo que pueda leer; lo que cambió se revisa con `git diff`. No hay red con lista de dominios permitidos: o toda o ninguna. En macOS el perfil deja escribir en `/private/var/folders`, donde está el temporal del usuario. Y dentro de un contenedor Docker bubblewrap necesita `--security-opt seccomp=unconfined --security-opt systempaths=unconfined`; con solo la primera, la comprobación del arranque pasa pero cada comando falla («Can't mount proc»): no se ejecuta nada, aunque el arranque no avisa.
 
+## Extensibilidad
+
+Tres formas de ampliar el harness sin cambiar su código, todas desde el workspace:
+
+- **Skills** (`.harness/skills/<nombre>/SKILL.md`): un frontmatter con `name` y `description`, y unas instrucciones. El modelo solo ve el nombre y la descripción (como mucho 250 caracteres) en el system prompt; el cuerpo entra en la conversación cuando llama a la tool `Skill`. Con `disable-model-invocation: true` no aparece en el catálogo.
+- **Hooks** (el bloque `hooks` de `.harness/settings.json`): un comando por evento, `PreToolUse` o `PostToolUse`, con un `matcher` por nombre de tool (`Bash`, `Edit|Write`, `mcp__github__*`). Recibe la llamada como JSON por stdin. En `PreToolUse`, salir con 2 bloquea la llamada antes de pedir permiso, y el stderr es el motivo que lee el modelo; un `{"message": "..."}` en stdout se añade al resultado. Cualquier otro fallo o un timeout (10 s) solo deja un aviso.
+- **Servidores MCP** (`.mcp.json`, solo stdio): sus tools aparecen como `mcp__<servidor>__<tool>` y preguntan por defecto; se permiten con reglas como `mcp__github`, `mcp__github__issue_read` o `mcp__github__issue_*`. `${VAR}` en `command`, `args` y `env` se expande, y un servidor con una variable sin definir no se conecta.
+
+Los hooks y los servidores MCP corren dentro del sandbox, como `Bash`: escritura solo en el workspace (y el temporal, en el caso de MCP), sin las rutas de credenciales y con la red del harness. Un servidor puede cortarse la red con `"sandbox": { "network": "none" }`, pero no abrirla, y `"sandbox": false` se ignora con aviso: solo `--sandbox none` los saca, a la vez que a `Bash`. `harness` hace opcional el sandbox de los servidores MCP; el lab no.
+
+Ten cuidado con los repositorios ajenos: sus hooks y su `.mcp.json` se ejecutan al arrancar. La cabecera dice cuáles son y con qué sandbox corren.
+
+### El ejemplo: arreglar una issue y hacer commit
+
+`examples/demo` trae una skill con la convención de commits del proyecto (`.harness/skills/convencion-commits`), un hook `PreToolUse` que bloquea un `git commit` cuyo mensaje no la cumple (`.harness/hooks/check-commit.mjs`) y un `.mcp.json` con `github-mcp-server` limitado a una tool de solo lectura, `issue_read`. La tarea es la [issue 4](https://github.com/pmeleroa/lab-harness-local/issues/4) de este repositorio.
+
+Instala el binario de `github-mcp-server` (Linux; en macOS, el fichero `Darwin` de la [página del release](https://github.com/github/github-mcp-server/releases/tag/v2.1.0)):
+
+```bash
+VERSION=v2.1.0
+ARCH=$(uname -m); [ "$ARCH" = aarch64 ] && ARCH=arm64
+mkdir -p ~/.local/bin
+curl -fsSL "https://github.com/github/github-mcp-server/releases/download/${VERSION}/github-mcp-server_Linux_${ARCH}.tar.gz" | tar -xz -C ~/.local/bin github-mcp-server
+```
+
+Crea un [token *fine-grained*](https://github.com/settings/personal-access-tokens/new) con acceso de solo lectura a los repositorios públicos y expórtalo; `.mcp.json` lo lee de la variable, no lo guarda:
+
+```bash
+export GITHUB_PERSONAL_ACCESS_TOKEN=<tu token>
+```
+
+La demo trabaja sobre una copia con su propio repositorio git: con el workspace en `examples/demo`, el `.git` del clon queda fuera y el sandbox no deja hacer commit (`Read-only file system`).
+
+```bash
+cp -r examples/demo ~/tienda-demo
+(cd ~/tienda-demo && git init -q && git add -A && git commit -qm "chore: estado inicial")
+npm run dev -- --workspace ~/tienda-demo --context-window 8192 --permission-mode acceptEdits \
+  --allow "mcp__github__issue_read" --allow "Bash(git add *)" --allow "Bash(git commit *)" \
+  "Lee la issue 4 de pmeleroa/lab-harness-local con la herramienta de GitHub, arréglala en este proyecto y haz commit." < /dev/null
+git -C ~/tienda-demo log --oneline -2
+```
+
+Con tres extensiones, el arranque ocupa unos 2.200 tokens; con una ventana de 4.096 se compacta en cada turno, por eso esta demo usa 8.192 (`OLLAMA_CONTEXT_LENGTH=8192 ollama serve`). Las salidas están en `examples/salidas/extensibilidad-*.txt`. Para dejarlo como estaba, borra `~/tienda-demo`.
+
 ## Estructura
 
 ```
 src/core/        loop, eventos y tareas en segundo plano
+src/skills/      carga de skills y catálogo
+src/hooks/       hooks PreToolUse y PostToolUse
+src/mcp/         configuración (.mcp.json) y cliente MCP por stdio
 src/context/     tope, limpieza y compaction, detección de recortes, AGENTS.md
 src/providers/   contrato canónico y adaptador a chat completions
-src/tools/       contrato de herramientas, registro, Read, Glob, Grep, Write, Edit y Bash, estado de lectura
+src/tools/       contrato de herramientas, registro, Read, Glob, Grep, Write, Edit, Bash, Skill y tools MCP, estado de lectura
 src/policy/      motor de permisos, reglas de ruta y de comando, parser de bash, sandbox, approver y settings
 src/cli.ts       salida por terminal
 examples/demo/   repositorio pequeño para las preguntas de ejemplo
 examples/desbordar.ts  conversación fija que desborda una ventana de 4096
-examples/salidas/      salidas reales de ejecuciones: escritura, seguridad y sandbox
-test/            proveedor simulado y tests
+examples/salidas/      salidas reales de ejecuciones: escritura, seguridad, sandbox y extensibilidad
+test/            proveedor simulado, servidor MCP de prueba y tests
 ```
 
 ## Licencia
