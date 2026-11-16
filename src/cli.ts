@@ -91,7 +91,7 @@ const approver: Approver = rl ? ttyApprover(rl) : denyAllApprover;
 const sandboxChoice = (requestedSandbox as SandboxChoice | undefined) ?? settings.sandbox.mode;
 const network = values["no-network"] ? "none" : settings.sandbox.network;
 
-const { agent, bus, workspace, model, policy, bash, warnings, endRun, dispose } = await createHarness({
+const { agent, bus, workspace, model, policy, bash, skills, warnings, endRun, dispose } = await createHarness({
   ...(permissionMode ? { permissionMode } : {}),
   ...(sandboxChoice ? { sandbox: sandboxChoice } : {}),
   ...(network ? { network } : {}),
@@ -100,6 +100,7 @@ const { agent, bus, workspace, model, policy, bash, warnings, endRun, dispose } 
     ask: settings.rules.ask,
     deny: [...settings.rules.deny, ...values.deny],
   },
+  hooks: settings.hooks,
   approver,
   ...(values.workspace ? { workspace: values.workspace } : {}),
   ...(values.model ? { model: values.model } : {}),
@@ -166,6 +167,13 @@ bus.on((e: AgentEvent) => {
 });
 
 process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\nsandbox: ${bash.sandboxName}${network !== "none" ? "" : bash.sandboxName === "none" ? " (--no-network no tiene efecto sin sandbox)" : ", sin red"}\n`);
+// Lo que amplía al harness sin tocar su código: qué skills ve el modelo y qué hooks del repositorio se ejecutan.
+if (skills.length) process.stderr.write(`skills: ${skills.map((s) => (s.modelInvocable ? s.name : `${s.name} (no invocable)`)).join(", ")}\n`);
+const hookList = (["PreToolUse", "PostToolUse"] as const).flatMap((ev) => (settings.hooks[ev] ?? []).map((h) => `${ev}${h.matcher ? `(${h.matcher})` : ""}: ${h.command}`));
+if (hookList.length) {
+  process.stderr.write(`hooks (código del repositorio, ${bash.sandboxName === "none" ? "SIN sandbox" : "dentro del sandbox"}):\n`);
+  for (const h of hookList) process.stderr.write(`  ${h}\n`);
+}
 for (const w of settings.warnings) process.stderr.write(`! ${w}\n`);
 for (const w of warnings) process.stderr.write(`! ${w}\n`);
 process.stderr.write("\n");

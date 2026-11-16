@@ -5,7 +5,25 @@ import type { PermissionMode, RuleSet } from "./engine.js";
 import { parseRule } from "./rules.js";
 import type { SandboxChoice } from "./sandbox/index.js";
 
+const HookEntrySchema = z.object({
+  /** Nombre de tool exacto o varios separados por "|". Sin matcher (o "*"), todas las tools. */
+  matcher: z.string().optional(),
+  /** Se ejecuta con `sh -c`, dentro del sandbox. */
+  command: z.string().min(1),
+  timeoutMs: z.number().int().positive().optional(),
+});
+
+export type HookEntry = z.infer<typeof HookEntrySchema>;
+export type HookEvent = "PreToolUse" | "PostToolUse";
+export type HookConfig = Partial<Record<HookEvent, HookEntry[]>>;
+
 const SettingsSchema = z.object({
+  hooks: z
+    .object({
+      PreToolUse: z.array(HookEntrySchema).optional(),
+      PostToolUse: z.array(HookEntrySchema).optional(),
+    })
+    .optional(),
   permissions: z
     .object({
       allow: z.array(z.string()).default([]),
@@ -26,6 +44,8 @@ export interface LoadedSettings {
   rules: RuleSet;
   mode?: PermissionMode;
   sandbox: { mode?: SandboxChoice; network?: "none" | "host" };
+  /** Hooks del proyecto: código del repositorio que se ejecuta en cada llamada a una tool (dentro del sandbox). */
+  hooks: HookConfig;
   warnings: string[];
   file?: string;
 }
@@ -33,13 +53,13 @@ export interface LoadedSettings {
 export const settingsFile = (workspace: string) => path.join(workspace, ".harness", "settings.json");
 
 /**
- * Lee los bloques `permissions` y `sandbox` de `<workspace>/.harness/settings.json`. No hay ningún `deny` implícito:
+ * Lee los bloques `permissions`, `sandbox` y `hooks` de `<workspace>/.harness/settings.json`. No hay ningún `deny` implícito:
  * lo que no esté escrito aquí o en `--deny` no se deniega. Un repositorio no puede escalarse a sí mismo: ni ponerse
  * en `bypass` (solo con `--permission-mode`), ni desactivar el sandbox (solo con `--sandbox none`), ni abrir la red
  * (puede cortarla, nunca abrirla).
  */
 export function loadSettings(workspace: string): LoadedSettings {
-  const out: LoadedSettings = { rules: { allow: [], ask: [], deny: [] }, sandbox: {}, warnings: [] };
+  const out: LoadedSettings = { rules: { allow: [], ask: [], deny: [] }, sandbox: {}, hooks: {}, warnings: [] };
   const file = settingsFile(workspace);
   let raw: string;
   try {
@@ -60,6 +80,9 @@ export function loadSettings(workspace: string): LoadedSettings {
   else if (sb?.mode) out.sandbox.mode = sb.mode;
   // Un proyecto puede restringir la red, no abrirla.
   if (sb?.network === "none") out.sandbox.network = "none";
+  const h = parsed.data.hooks;
+  if (h?.PreToolUse?.length) out.hooks.PreToolUse = h.PreToolUse;
+  if (h?.PostToolUse?.length) out.hooks.PostToolUse = h.PostToolUse;
   return out;
 }
 

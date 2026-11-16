@@ -17,6 +17,8 @@ import { globTool, grepTool } from "./tools/search.js";
 import { writeTool } from "./tools/write.js";
 import { type Skill, loadSkills, loadedSkills, skillCatalog } from "./skills/loader.js";
 import { createSkillTool } from "./tools/skill.js";
+import { HookRunner } from "./hooks/runner.js";
+import type { HookConfig } from "./policy/settings.js";
 
 export const DEFAULT_MODEL = "qwen2.5:7b";
 export const DEFAULT_BASE_URL = "http://localhost:11434/v1";
@@ -32,6 +34,8 @@ export interface HarnessOptions {
   sandbox?: SandboxChoice;
   /** Red dentro del sandbox: `host` (la del usuario) o `none` (sin red). */
   network?: "none" | "host";
+  /** Hooks PreToolUse y PostToolUse (el bloque `hooks` de `.harness/settings.json`). Corren dentro del sandbox. */
+  hooks?: HookConfig;
   /** Quién responde cuando el motor pregunta. Sin él, se deniega: fallar cerrado. */
   approver?: Approver;
   /** Sobrescribe $HARNESS_MODEL. */
@@ -119,6 +123,14 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     },
     await BashParser.create(),
   );
+  // Los hooks corren dentro del mismo sandbox que Bash: escritura solo en el workspace, sin credenciales y con la misma red.
+  const hooks = new HookRunner(o.hooks ?? {}, {
+    cwd: workspace,
+    writablePaths: [workspace],
+    hiddenPaths: defaultHiddenPaths(),
+    network: o.network ?? "host",
+    sandbox,
+  });
   const instructions = loadInstructions(workspace);
   const catalog = skillCatalog(skills);
   const system = [
@@ -136,6 +148,7 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
       policy,
       approver: o.approver ?? denyAllApprover,
       notifications: { drain: () => notificationBlocks(tasks.drain()) },
+      hooks,
     },
     { ...defaultAgentConfig(model), ...o.config },
   );
