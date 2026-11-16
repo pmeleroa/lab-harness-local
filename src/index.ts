@@ -15,6 +15,8 @@ import { editTool } from "./tools/edit.js";
 import { readTool } from "./tools/read.js";
 import { globTool, grepTool } from "./tools/search.js";
 import { writeTool } from "./tools/write.js";
+import { type Skill, loadSkills, loadedSkills, skillCatalog } from "./skills/loader.js";
+import { createSkillTool } from "./tools/skill.js";
 
 export const DEFAULT_MODEL = "qwen2.5:7b";
 export const DEFAULT_BASE_URL = "http://localhost:11434/v1";
@@ -49,6 +51,8 @@ export interface Harness {
   bash: BashSession;
   /** Comandos en segundo plano (Bash con run_in_background). */
   tasks: BackgroundTasks;
+  /** Skills de `<workspace>/.harness/skills`. */
+  skills: Skill[];
   workspace: string;
   model: string;
   /** Avisos de arranque (por ejemplo, que se asume la ventana por defecto o que no hay sandbox). */
@@ -87,6 +91,11 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   if (warning) warnings.push(warning);
   const bash = new BashSession({ workspace, sandbox, network: o.network ?? "host", hiddenPaths: defaultHiddenPaths() });
 
+  // Skills: el catálogo (nombre y descripción) va al system prompt; el cuerpo, solo cuando el modelo la invoca.
+  const loaded = loadSkills(workspace);
+  const skills = loaded.skills;
+  warnings.push(...loaded.warnings);
+
   const bus = new EventBus();
   const tasks = new BackgroundTasks({ bus });
   const shells = new BackgroundShells(bash, tasks);
@@ -100,6 +109,8 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     createBashOutputTool(shells),
     createKillShellTool(shells),
   );
+  // La tool Skill solo existe si hay algo que invocar. `agent` se crea más abajo: solo se usa al ejecutarla.
+  if (skills.some((s) => s.modelInvocable)) registry.register(createSkillTool(skills, (n) => loadedSkills(agent.messages).has(n)));
   const policy = new PolicyEngine(
     {
       workspace,
@@ -109,7 +120,12 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     await BashParser.create(),
   );
   const instructions = loadInstructions(workspace);
-  const system = [{ text: `${SYSTEM_PROMPT}\nWorkspace: ${workspace}` }, ...(instructions ? [{ text: instructions }] : [])];
+  const catalog = skillCatalog(skills);
+  const system = [
+    { text: `${SYSTEM_PROMPT}\nWorkspace: ${workspace}` },
+    ...(instructions ? [{ text: instructions }] : []),
+    ...(catalog ? [{ text: catalog }] : []),
+  ];
   const agent = new Agent(
     {
       provider,
@@ -130,6 +146,7 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     policy,
     bash,
     tasks,
+    skills,
     workspace,
     model,
     warnings,
