@@ -143,6 +143,9 @@ bus.on((e: AgentEvent) => {
         : null
       : e.t === "tool_start"
       ? `> ${e.call.name} ${short(e.call.input)}`
+      : e.t === "hook_blocked"
+      ? // Ni se pidió permiso ni se ejecutó: se enseña la llamada y lo que el hook le dice al modelo.
+        `> ${e.call.name} ${short(e.call.input)}\nx bloqueado por un hook: ${e.message}`
       : e.t === "tool_end"
         ? `  ${e.result.is_error ? "error" : "ok"} (${e.durationMs} ms${e.result.content.includes("characters omitted") ? ", recortado al tope" : ""})` +
           // De un comando se enseña también lo que devolvió: es lo que el modelo va a leer.

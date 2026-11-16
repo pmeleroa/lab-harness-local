@@ -149,6 +149,17 @@ describe("hooks en el loop", () => {
     expect(String(res.content)).not.toContain("contenido");
   });
 
+  it("un bloqueo se emite como evento hook_blocked (la CLI lo enseña), sin tool_start", async () => {
+    const { h } = await harnessWith({ PreToolUse: [{ matcher: "Read", command: "echo 'no' >&2; exit 2" }] });
+    const events: string[] = [];
+    h.bus.on((e) => {
+      if (e.t === "hook_blocked") events.push(`${e.t}:${e.call.name}:${e.message}`);
+      if (e.t === "tool_start") events.push(e.t);
+    });
+    await h.agent.run("lee a.txt");
+    expect(events).toEqual([expect.stringMatching(/^hook_blocked:Read:Blocked by PreToolUse hook .*no/)]);
+  });
+
   it("PreToolUse corre antes de los permisos: un bloqueo no llega a preguntar al usuario", async () => {
     let asked = 0;
     const { h, provider } = await harnessWith(

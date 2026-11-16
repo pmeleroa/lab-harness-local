@@ -412,7 +412,10 @@ export class Agent {
     const notes: string[] = [];
     if (this.deps.hooks && !this.deps.hooks.empty) {
       const pre = await this.deps.hooks.run("PreToolUse", { tool: call.name, input }, signal);
-      if (pre.block) return result(pre.message, true);
+      if (pre.block) {
+        this.emit({ t: "hook_blocked", call, message: pre.message });
+        return result(pre.message, true);
+      }
       notes.push(...pre.notes);
     }
     const withNotes = (r: ToolResultBlock): ToolResultBlock =>
