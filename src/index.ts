@@ -121,7 +121,8 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     createKillShellTool(shells),
   );
   // La tool Skill solo existe si hay algo que invocar. `agent` se crea más abajo: solo se usa al ejecutarla.
-  if (skills.some((s) => s.modelInvocable)) registry.register(createSkillTool(skills, (n) => loadedSkills(agent.messages).has(n)));
+  // «Cargada» es lo que el modelo aún ve: si la limpieza quitó el cuerpo, se vuelve a dar entero.
+  if (skills.some((s) => s.modelInvocable)) registry.register(createSkillTool(skills, (n) => loadedSkills(agent.visibleMessages).has(n)));
 
   // MCP: los servidores de .mcp.json son código del repositorio que se ejecuta al arrancar, dentro del mismo sandbox
   // que Bash (la CLI dice cuáles y con qué sandbox). Sus tools van detrás de las propias.

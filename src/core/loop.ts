@@ -111,6 +111,11 @@ const RESERVE_FRACTION = 0.25;
 
 export class Agent {
   readonly messages: Message[] = [];
+
+  /** La historia tal como la ve el modelo: con los tool_result limpiados sustituidos por la nota. */
+  get visibleMessages(): Message[] {
+    return this.clearing.view(this.messages);
+  }
   private _state: AgentState = "idle";
   private readonly clearing = new ToolResultClearing();
   /** Tokens reales de la última petición y lo que estimábamos de ella: calibra la estimación de lo añadido después. */
@@ -416,6 +421,8 @@ export class Agent {
         this.emit({ t: "hook_blocked", call, message: pre.message });
         return result(pre.message, true);
       }
+      // Si se canceló mientras corría el hook, el runner lo mata y no bloquea: no se sigue hacia los permisos ni la tool.
+      if (signal.aborted) return result(INTERRUPTED, true);
       notes.push(...pre.notes);
     }
     const withNotes = (r: ToolResultBlock): ToolResultBlock =>

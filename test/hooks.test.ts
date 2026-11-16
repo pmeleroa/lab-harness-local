@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -170,6 +170,19 @@ describe("hooks en el loop", () => {
     await h.agent.run("escribe b.txt");
     expect(asked).toBe(0);
     expect(String(toolResults(provider.requests.at(-1)!)[0]!.content)).toContain("no se escribe aquí");
+  });
+
+  it("si se cancela mientras corre el PreToolUse, la tool no se ejecuta aunque esté permitida", async () => {
+    const ctl = new AbortController();
+    const provider = new FakeProvider((_req, turn) => (turn === 1 ? { content: [use("w1", "Write", { file_path: "b.txt", content: "x" })] } : { content: [text("listo")] }));
+    const ws = dir();
+    const h = await createHarness({ workspace: ws, sandbox: "none", provider, permissionMode: "acceptEdits", hooks: { PreToolUse: [{ matcher: "Write", command: "sleep 5" }] } });
+    harnesses.push(h);
+    setTimeout(() => ctl.abort(), 300);
+    await h.agent.run("escribe b.txt", ctl.signal);
+    expect(existsSync(path.join(ws, "b.txt"))).toBe(false);
+    const res = h.agent.messages.flatMap((m) => m.content).find((b) => b.type === "tool_result");
+    expect(res).toMatchObject({ is_error: true, content: expect.stringMatching(/Interrupted/) });
   });
 
   it("PostToolUse añade su aviso al tool_result que ve el modelo", async () => {

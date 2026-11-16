@@ -156,6 +156,32 @@ describe("harness", () => {
     }
   });
 
+  it("si la limpieza de contexto quitó el cuerpo de la skill, la siguiente invocación lo vuelve a dar entero", async () => {
+    const ws = tmp();
+    // Un cuerpo de tamaño real: la limpieza no toca resultados diminutos (MIN_CLEARABLE_TOKENS).
+    writeSkill(path.join(ws, ".harness", "skills"), "deploy", "name: deploy\ndescription: Despliega el servicio", `Ejecuta make deploy.\n${"Paso del procedimiento.\n".repeat(100)}`);
+    writeFileSync(path.join(ws, "a.txt"), "linea de relleno\n".repeat(2_000));
+    const calls = [use("s1", "Skill", { skill: "deploy" }), use("r1", "Read", { file_path: "a.txt" }), use("r2", "Read", { file_path: "a.txt" }), use("s2", "Skill", { skill: "deploy" })];
+    const provider = new FakeProvider((_req, turn) => (turn <= calls.length ? { content: [calls[turn - 1]!] } : { content: [text("hecho")] }));
+    const h = await createHarness({
+      workspace: ws,
+      sandbox: "none",
+      provider,
+      config: { contextWindow: 20_000, maxTokens: 4_000, context: { maxToolResultTokens: 25_000, clearAt: 0.1, compactAt: 0.99, keepToolResults: 1 } },
+    });
+    try {
+      await h.agent.run("despliega");
+      // El primer resultado de Skill se limpió en la vista del modelo, aunque siga entero en la historia guardada.
+      expect(h.agent.visibleMessages.flatMap((m) => m.content).find((b) => b.type === "tool_result" && b.tool_use_id === "s1")).toMatchObject({
+        content: expect.not.stringContaining("make deploy"),
+      });
+      const again = h.agent.messages.flatMap((m) => m.content).find((b) => b.type === "tool_result" && b.tool_use_id === "s2");
+      expect(again).toMatchObject({ content: expect.stringContaining("Ejecuta make deploy.") });
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("sin skills no hay catálogo ni tool Skill", async () => {
     const provider = new FakeProvider(() => ({ content: [text("ok")] }));
     const h = await createHarness({ workspace: tmp(), sandbox: "none", provider });
