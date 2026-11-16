@@ -18,6 +18,9 @@ import { writeTool } from "./tools/write.js";
 import { type Skill, loadSkills, loadedSkills, skillCatalog } from "./skills/loader.js";
 import { createSkillTool } from "./tools/skill.js";
 import { HookRunner } from "./hooks/runner.js";
+import { loadMcpConfig } from "./mcp/config.js";
+import { McpManager } from "./mcp/manager.js";
+import { createMcpTools } from "./tools/mcp.js";
 import type { HookConfig } from "./policy/settings.js";
 
 export const DEFAULT_MODEL = "qwen2.5:7b";
@@ -36,6 +39,8 @@ export interface HarnessOptions {
   network?: "none" | "host";
   /** Hooks PreToolUse y PostToolUse (el bloque `hooks` de `.harness/settings.json`). Corren dentro del sandbox. */
   hooks?: HookConfig;
+  /** false: no carga `<workspace>/.mcp.json`. */
+  mcp?: boolean;
   /** Quién responde cuando el motor pregunta. Sin él, se deniega: fallar cerrado. */
   approver?: Approver;
   /** Sobrescribe $HARNESS_MODEL. */
@@ -57,6 +62,8 @@ export interface Harness {
   tasks: BackgroundTasks;
   /** Skills de `<workspace>/.harness/skills`. */
   skills: Skill[];
+  /** Servidores MCP de `<workspace>/.mcp.json`, ya conectados (o fallidos). */
+  mcp: McpManager;
   workspace: string;
   model: string;
   /** Avisos de arranque (por ejemplo, que se asume la ventana por defecto o que no hay sandbox). */
@@ -115,6 +122,16 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   );
   // La tool Skill solo existe si hay algo que invocar. `agent` se crea más abajo: solo se usa al ejecutarla.
   if (skills.some((s) => s.modelInvocable)) registry.register(createSkillTool(skills, (n) => loadedSkills(agent.messages).has(n)));
+
+  // MCP: los servidores de .mcp.json son código del repositorio que se ejecuta al arrancar, dentro del mismo sandbox
+  // que Bash (la CLI dice cuáles y con qué sandbox). Sus tools van detrás de las propias.
+  const mcpConfig = o.mcp === false ? { servers: [], warnings: [] } : loadMcpConfig(workspace);
+  warnings.push(...mcpConfig.warnings);
+  const mcp = new McpManager(mcpConfig.servers, { workspace, sandbox, hiddenPaths: defaultHiddenPaths(), network: o.network ?? "host" });
+  await mcp.connectAll();
+  for (const s of mcp.servers()) if (s.status === "failed") warnings.push(`MCP server "${s.name}" failed to connect: ${s.error}`);
+  registry.register(...createMcpTools(mcp, warnings));
+
   const policy = new PolicyEngine(
     {
       workspace,
@@ -160,6 +177,7 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     bash,
     tasks,
     skills,
+    mcp,
     workspace,
     model,
     warnings,
@@ -171,11 +189,12 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     dispose: () => {
       tasks.disposeAll();
       bash.dispose();
+      void mcp.dispose();
     },
   };
 }
 
-export { Agent, BackgroundTasks, BashParser, EventBus, OpenAIProvider, ToolRegistry };
+export { Agent, BackgroundTasks, BashParser, EventBus, McpManager, OpenAIProvider, ToolRegistry };
 export type * from "./providers/canonical.js";
 export type * from "./core/events.js";
 export type { Approver, ApprovalAnswer, ApprovalRequest } from "./core/loop.js";

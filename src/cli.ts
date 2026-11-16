@@ -91,7 +91,7 @@ const approver: Approver = rl ? ttyApprover(rl) : denyAllApprover;
 const sandboxChoice = (requestedSandbox as SandboxChoice | undefined) ?? settings.sandbox.mode;
 const network = values["no-network"] ? "none" : settings.sandbox.network;
 
-const { agent, bus, workspace, model, policy, bash, skills, warnings, endRun, dispose } = await createHarness({
+const { agent, bus, workspace, model, policy, bash, skills, mcp, warnings, endRun, dispose } = await createHarness({
   ...(permissionMode ? { permissionMode } : {}),
   ...(sandboxChoice ? { sandbox: sandboxChoice } : {}),
   ...(network ? { network } : {}),
@@ -173,6 +173,12 @@ const hookList = (["PreToolUse", "PostToolUse"] as const).flatMap((ev) => (setti
 if (hookList.length) {
   process.stderr.write(`hooks (código del repositorio, ${bash.sandboxName === "none" ? "SIN sandbox" : "dentro del sandbox"}):\n`);
   for (const h of hookList) process.stderr.write(`  ${h}\n`);
+}
+// Los servidores de .mcp.json son procesos que el harness ya ha lanzado: qué se ejecuta, con cuántas tools y con qué sandbox.
+for (const s of mcp.servers()) {
+  const cmd = [s.config.command, ...s.config.args].join(" ");
+  const box = s.sandbox === "none" ? "SIN sandbox" : `sandbox ${s.sandbox}${network === "none" || s.config.network === "none" ? ", sin red" : ""}`;
+  process.stderr.write(`mcp: ${s.name} (${cmd}) ${s.status === "connected" ? `${s.tools.length} tools` : "no conectado"}, ${box}\n`);
 }
 for (const w of settings.warnings) process.stderr.write(`! ${w}\n`);
 for (const w of warnings) process.stderr.write(`! ${w}\n`);
