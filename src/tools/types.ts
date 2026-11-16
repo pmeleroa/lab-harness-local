@@ -30,13 +30,17 @@ export type PermissionTarget =
   | { kind: "path"; path: string; access: "read" | "write" }
   /** `cwd`: directorio del shell en el que se ejecutará; las rutas relativas del comando se resuelven desde ahí. */
   | { kind: "command"; command: string; cwd?: string }
-  | { kind: "task"; id: string };
+  | { kind: "task"; id: string }
+  /** Tool de un servidor MCP: pregunta salvo regla (`mcp__<servidor>`, `mcp__<servidor>__<tool>` o comodín). */
+  | { kind: "mcp"; server: string };
 
 export interface Tool<S extends z.ZodType = z.ZodType> {
   name: string;
   /** El texto que lee el modelo. Aquí se gana o se pierde calidad. */
   description: string;
   schema: S;
+  /** JSON Schema que se envía al modelo en lugar del derivado de `schema` (tools MCP: lo da el servidor). */
+  jsonSchema?: Record<string, unknown>;
   /** true => se puede ejecutar en paralelo con otras readOnly. */
   readOnly: boolean | ((input: z.infer<S>) => boolean);
   permissionTarget(input: z.infer<S>, ctx: Pick<ToolCtx, "workspace">): PermissionTarget;
@@ -46,6 +50,7 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
 export const defineTool = <S extends z.ZodType>(t: Tool<S>): Tool<S> => t;
 
 export function toolSpec(t: Tool): ToolSpec {
+  if (t.jsonSchema) return { name: t.name, description: t.description, inputSchema: t.jsonSchema };
   const schema = z.toJSONSchema(t.schema, { target: "draft-2020-12" }) as Record<string, unknown>;
   delete schema.$schema;
   return { name: t.name, description: t.description, inputSchema: schema };

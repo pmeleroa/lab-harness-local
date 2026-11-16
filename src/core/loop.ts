@@ -24,6 +24,7 @@ import {
   summaryMessage,
 } from "../context/manager.js";
 import { OVERFLOW_MIN_GROWTH_COMPACT, type RequestSample, looksTruncated } from "../context/overflow.js";
+import type { HookRunner } from "../hooks/runner.js";
 import type { PolicyEngine } from "../policy/engine.js";
 import { FileStateCache } from "../tools/file-state.js";
 import type { ToolRegistry } from "../tools/registry.js";
@@ -89,6 +90,8 @@ export interface AgentDeps {
   approver: Approver;
   /** Avisos de tareas en segundo plano que han terminado: se entregan antes de la siguiente llamada al modelo. */
   notifications?: { drain(): Block[] };
+  /** Hooks PreToolUse y PostToolUse, dentro del sandbox. */
+  hooks?: HookRunner;
 }
 
 export interface RunResult {
@@ -108,6 +111,11 @@ const RESERVE_FRACTION = 0.25;
 
 export class Agent {
   readonly messages: Message[] = [];
+
+  /** La historia tal como la ve el modelo: con los tool_result limpiados sustituidos por la nota. */
+  get visibleMessages(): Message[] {
+    return this.clearing.view(this.messages);
+  }
   private _state: AgentState = "idle";
   private readonly clearing = new ToolResultClearing();
   /** Tokens reales de la última petición y lo que estimábamos de ella: calibra la estimación de lo añadido después. */
@@ -405,6 +413,21 @@ export class Agent {
     if (!parsed.ok) return result(parsed.error, true);
     const { tool, input } = parsed;
 
+    // Hooks antes de permisos: un bloqueo no llega a preguntar al usuario.
+    const notes: string[] = [];
+    if (this.deps.hooks && !this.deps.hooks.empty) {
+      const pre = await this.deps.hooks.run("PreToolUse", { tool: call.name, input }, signal);
+      if (pre.block) {
+        this.emit({ t: "hook_blocked", call, message: pre.message });
+        return result(pre.message, true);
+      }
+      // Si se canceló mientras corría el hook, el runner lo mata y no bloquea: no se sigue hacia los permisos ni la tool.
+      if (signal.aborted) return result(INTERRUPTED, true);
+      notes.push(...pre.notes);
+    }
+    const withNotes = (r: ToolResultBlock): ToolResultBlock =>
+      notes.length ? { ...r, content: `${String(r.content)}\n\n${notes.join("\n")}` } : r;
+
     // Permisos: el motor decide sobre la ruta real; `ask` pasa por el approver.
     const target = tool.permissionTarget(input, { workspace: this.deps.workspace });
     const decision = this.deps.policy.evaluate(call, target);
@@ -429,7 +452,7 @@ export class Agent {
         denyMessage = `The user denied this action${answer.feedback ? `: ${answer.feedback}` : "."} Do not retry it with another tool; ask the user how to proceed if needed.`;
     }
     this.emit({ t: "permission_decision", call, decision: allowed ? "allow" : "deny", source, reason: decision.reason });
-    if (!allowed) return result(denyMessage, true);
+    if (!allowed) return withNotes(result(denyMessage, true));
 
     this.emit({ t: "tool_start", call });
     const t0 = Date.now();
@@ -450,6 +473,15 @@ export class Agent {
     } catch (e) {
       out = result(`Tool ${call.name} failed: ${errorMessage(e)}`, true);
     }
+    if (this.deps.hooks && !this.deps.hooks.empty) {
+      const post = await this.deps.hooks.run(
+        "PostToolUse",
+        { tool: call.name, input, result: { content: String(out.content), isError: !!out.is_error } },
+        signal,
+      );
+      notes.push(...post.notes);
+    }
+    out = withNotes(out);
     this.emit({ t: "tool_end", call, result: out, durationMs: Date.now() - t0 });
     return out;
   }

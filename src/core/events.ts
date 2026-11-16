@@ -16,6 +16,8 @@ export type AgentEvent =
   /** Resultado final de los permisos para esta llamada; `source` dice quién decidió. */
   | { t: "permission_decision"; call: ToolUseBlock; decision: "allow" | "deny"; source: "policy" | "user"; reason: string }
   | { t: "tool_end"; call: ToolUseBlock; result: ToolResultBlock; durationMs: number }
+  /** Un hook PreToolUse bloqueó la llamada: no se pidió permiso ni se ejecutó. `message` es lo que recibe el modelo. */
+  | { t: "hook_blocked"; call: ToolUseBlock; message: string }
   /** `truncated`: el servidor recortó la conversación; su uso no sirve para calibrar el contexto. */
   | { t: "turn_end"; turn: number; usage: Usage; truncated?: boolean }
   /** El loop liberó contexto: limpió `count` tool_results antiguos o compactó la conversación. En tokens. */

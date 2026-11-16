@@ -1,5 +1,8 @@
 {
   "permissions": {
     "deny": ["Read(**/.env*)", "Edit(**/.env*)", "Edit(.harness/**)"]
+  },
+  "hooks": {
+    "PreToolUse": [{ "matcher": "Bash", "command": "node .harness/hooks/check-commit.mjs" }]
   }
 }

@@ -15,6 +15,13 @@ import { editTool } from "./tools/edit.js";
 import { readTool } from "./tools/read.js";
 import { globTool, grepTool } from "./tools/search.js";
 import { writeTool } from "./tools/write.js";
+import { type Skill, loadSkills, loadedSkills, skillCatalog } from "./skills/loader.js";
+import { createSkillTool } from "./tools/skill.js";
+import { HookRunner } from "./hooks/runner.js";
+import { loadMcpConfig } from "./mcp/config.js";
+import { McpManager } from "./mcp/manager.js";
+import { createMcpTools } from "./tools/mcp.js";
+import type { HookConfig } from "./policy/settings.js";
 
 export const DEFAULT_MODEL = "qwen2.5:7b";
 export const DEFAULT_BASE_URL = "http://localhost:11434/v1";
@@ -30,6 +37,10 @@ export interface HarnessOptions {
   sandbox?: SandboxChoice;
   /** Red dentro del sandbox: `host` (la del usuario) o `none` (sin red). */
   network?: "none" | "host";
+  /** Hooks PreToolUse y PostToolUse (el bloque `hooks` de `.harness/settings.json`). Corren dentro del sandbox. */
+  hooks?: HookConfig;
+  /** false: no carga `<workspace>/.mcp.json`. */
+  mcp?: boolean;
   /** Quién responde cuando el motor pregunta. Sin él, se deniega: fallar cerrado. */
   approver?: Approver;
   /** Sobrescribe $HARNESS_MODEL. */
@@ -49,6 +60,10 @@ export interface Harness {
   bash: BashSession;
   /** Comandos en segundo plano (Bash con run_in_background). */
   tasks: BackgroundTasks;
+  /** Skills de `<workspace>/.harness/skills`. */
+  skills: Skill[];
+  /** Servidores MCP de `<workspace>/.mcp.json`, ya conectados (o fallidos). */
+  mcp: McpManager;
   workspace: string;
   model: string;
   /** Avisos de arranque (por ejemplo, que se asume la ventana por defecto o que no hay sandbox). */
@@ -87,6 +102,11 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   if (warning) warnings.push(warning);
   const bash = new BashSession({ workspace, sandbox, network: o.network ?? "host", hiddenPaths: defaultHiddenPaths() });
 
+  // Skills: el catálogo (nombre y descripción) va al system prompt; el cuerpo, solo cuando el modelo la invoca.
+  const loaded = loadSkills(workspace);
+  const skills = loaded.skills;
+  warnings.push(...loaded.warnings);
+
   const bus = new EventBus();
   const tasks = new BackgroundTasks({ bus });
   const shells = new BackgroundShells(bash, tasks);
@@ -100,6 +120,19 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     createBashOutputTool(shells),
     createKillShellTool(shells),
   );
+  // La tool Skill solo existe si hay algo que invocar. `agent` se crea más abajo: solo se usa al ejecutarla.
+  // «Cargada» es lo que el modelo aún ve: si la limpieza quitó el cuerpo, se vuelve a dar entero.
+  if (skills.some((s) => s.modelInvocable)) registry.register(createSkillTool(skills, (n) => loadedSkills(agent.visibleMessages).has(n)));
+
+  // MCP: los servidores de .mcp.json son código del repositorio que se ejecuta al arrancar, dentro del mismo sandbox
+  // que Bash (la CLI dice cuáles y con qué sandbox). Sus tools van detrás de las propias.
+  const mcpConfig = o.mcp === false ? { servers: [], warnings: [] } : loadMcpConfig(workspace);
+  warnings.push(...mcpConfig.warnings);
+  const mcp = new McpManager(mcpConfig.servers, { workspace, sandbox, hiddenPaths: defaultHiddenPaths(), network: o.network ?? "host" });
+  await mcp.connectAll();
+  for (const s of mcp.servers()) if (s.status === "failed") warnings.push(`MCP server "${s.name}" failed to connect: ${s.error}`);
+  registry.register(...createMcpTools(mcp, warnings));
+
   const policy = new PolicyEngine(
     {
       workspace,
@@ -108,8 +141,21 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     },
     await BashParser.create(),
   );
+  // Los hooks corren dentro del mismo sandbox que Bash: escritura solo en el workspace, sin credenciales y con la misma red.
+  const hooks = new HookRunner(o.hooks ?? {}, {
+    cwd: workspace,
+    writablePaths: [workspace],
+    hiddenPaths: defaultHiddenPaths(),
+    network: o.network ?? "host",
+    sandbox,
+  });
   const instructions = loadInstructions(workspace);
-  const system = [{ text: `${SYSTEM_PROMPT}\nWorkspace: ${workspace}` }, ...(instructions ? [{ text: instructions }] : [])];
+  const catalog = skillCatalog(skills);
+  const system = [
+    { text: `${SYSTEM_PROMPT}\nWorkspace: ${workspace}` },
+    ...(instructions ? [{ text: instructions }] : []),
+    ...(catalog ? [{ text: catalog }] : []),
+  ];
   const agent = new Agent(
     {
       provider,
@@ -120,6 +166,7 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
       policy,
       approver: o.approver ?? denyAllApprover,
       notifications: { drain: () => notificationBlocks(tasks.drain()) },
+      hooks,
     },
     { ...defaultAgentConfig(model), ...o.config },
   );
@@ -130,6 +177,8 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     policy,
     bash,
     tasks,
+    skills,
+    mcp,
     workspace,
     model,
     warnings,
@@ -141,11 +190,12 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     dispose: () => {
       tasks.disposeAll();
       bash.dispose();
+      void mcp.dispose();
     },
   };
 }
 
-export { Agent, BackgroundTasks, BashParser, EventBus, OpenAIProvider, ToolRegistry };
+export { Agent, BackgroundTasks, BashParser, EventBus, McpManager, OpenAIProvider, ToolRegistry };
 export type * from "./providers/canonical.js";
 export type * from "./core/events.js";
 export type { Approver, ApprovalAnswer, ApprovalRequest } from "./core/loop.js";
