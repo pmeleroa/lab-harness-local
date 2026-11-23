@@ -3,7 +3,7 @@ import type { ToolUseBlock } from "../providers/canonical.js";
 import type { PermissionTarget } from "../tools/types.js";
 import { isInside, resolveReal } from "../tools/types.js";
 import type { BashParser, SimpleCommand, Token } from "./bash-parser.js";
-import { type Rule, matchCommand, matchPath, parseRule } from "./rules.js";
+import { type Rule, matchCommand, matchMcpRule, matchPath, parseRule } from "./rules.js";
 
 export type PermissionMode = "default" | "acceptEdits" | "bypass";
 
@@ -132,7 +132,22 @@ export class PolicyEngine {
         return this.evaluateCommand(call.name, target.command, target.cwd ?? this.cfg.workspace);
       case "task":
         return this.byRules((r) => r.tool === call.name && !r.specifier) ?? { kind: "allow", reason: "own background task" };
+      case "mcp":
+        return this.evaluateMcp(call.name, target.server);
     }
+  }
+
+  /** Por defecto preguntan. Lo que declare el servidor (readOnlyHint) no cuenta. Un deny gana siempre. */
+  private evaluateMcp(toolName: string, server: string): Decision {
+    const hit = (r: Rule) => !r.specifier && matchMcpRule(r.tool, toolName, server);
+    const all = (list: RuleList) => [...this.sessionRules[list], ...this.rules[list]];
+    const deny = all("deny").find(hit);
+    if (deny) return { kind: "deny", reason: `rule ${deny.raw}` };
+    const ask = all("ask").find(hit);
+    if (ask) return { kind: "ask", reason: `rule ${ask.raw}` };
+    const allow = all("allow").find(hit);
+    if (allow) return { kind: "allow", reason: `rule ${allow.raw}` };
+    return { kind: "ask", reason: `${toolName} (MCP server "${server}") requires approval` };
   }
 
   private evaluatePath(toolName: string, absPath: string, access: "read" | "write"): Decision {

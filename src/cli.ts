@@ -91,7 +91,7 @@ const approver: Approver = rl ? ttyApprover(rl) : denyAllApprover;
 const sandboxChoice = (requestedSandbox as SandboxChoice | undefined) ?? settings.sandbox.mode;
 const network = values["no-network"] ? "none" : settings.sandbox.network;
 
-const { agent, bus, workspace, model, policy, bash, warnings, endRun, dispose } = await createHarness({
+const { agent, bus, workspace, model, policy, bash, skills, mcp, warnings, endRun, dispose } = await createHarness({
   ...(permissionMode ? { permissionMode } : {}),
   ...(sandboxChoice ? { sandbox: sandboxChoice } : {}),
   ...(network ? { network } : {}),
@@ -100,6 +100,7 @@ const { agent, bus, workspace, model, policy, bash, warnings, endRun, dispose } 
     ask: settings.rules.ask,
     deny: [...settings.rules.deny, ...values.deny],
   },
+  hooks: settings.hooks,
   approver,
   ...(values.workspace ? { workspace: values.workspace } : {}),
   ...(values.model ? { model: values.model } : {}),
@@ -142,6 +143,9 @@ bus.on((e: AgentEvent) => {
         : null
       : e.t === "tool_start"
       ? `> ${e.call.name} ${short(e.call.input)}`
+      : e.t === "hook_blocked"
+      ? // Ni se pidió permiso ni se ejecutó: se enseña la llamada y lo que el hook le dice al modelo.
+        `> ${e.call.name} ${short(e.call.input)}\nx bloqueado por un hook: ${e.message}`
       : e.t === "tool_end"
         ? `  ${e.result.is_error ? "error" : "ok"} (${e.durationMs} ms${e.result.content.includes("characters omitted") ? ", recortado al tope" : ""})` +
           // De un comando se enseña también lo que devolvió: es lo que el modelo va a leer.
@@ -166,6 +170,19 @@ bus.on((e: AgentEvent) => {
 });
 
 process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\nsandbox: ${bash.sandboxName}${network !== "none" ? "" : bash.sandboxName === "none" ? " (--no-network no tiene efecto sin sandbox)" : ", sin red"}\n`);
+// Lo que amplía al harness sin tocar su código: qué skills ve el modelo y qué hooks del repositorio se ejecutan.
+if (skills.length) process.stderr.write(`skills: ${skills.map((s) => (s.modelInvocable ? s.name : `${s.name} (no invocable)`)).join(", ")}\n`);
+const hookList = (["PreToolUse", "PostToolUse"] as const).flatMap((ev) => (settings.hooks[ev] ?? []).map((h) => `${ev}${h.matcher ? `(${h.matcher})` : ""}: ${h.command}`));
+if (hookList.length) {
+  process.stderr.write(`hooks (código del repositorio, ${bash.sandboxName === "none" ? "SIN sandbox" : "dentro del sandbox"}):\n`);
+  for (const h of hookList) process.stderr.write(`  ${h}\n`);
+}
+// Los servidores de .mcp.json son procesos que el harness ya ha lanzado: qué se ejecuta, con cuántas tools y con qué sandbox.
+for (const s of mcp.servers()) {
+  const cmd = [s.config.command, ...s.config.args].join(" ");
+  const box = s.sandbox === "none" ? "SIN sandbox" : `sandbox ${s.sandbox}${network === "none" || s.config.network === "none" ? ", sin red" : ""}`;
+  process.stderr.write(`mcp: ${s.name} (${cmd}) ${s.status === "connected" ? `${s.tools.length} tools` : "no conectado"}, ${box}\n`);
+}
 for (const w of settings.warnings) process.stderr.write(`! ${w}\n`);
 for (const w of warnings) process.stderr.write(`! ${w}\n`);
 process.stderr.write("\n");

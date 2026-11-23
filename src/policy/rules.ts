@@ -12,6 +12,8 @@ import type { Token } from "./bash-parser.js";
  *   Read(src/**)         glob relativo al workspace (o absoluto / con ~)
  *   Edit(**\/*.ts)       aplica a toda escritura de ficheros (Edit, Write, redirecciones)
  *   Edit                 sin especificador: la herramienta entera
+ *   mcp__github          todas las tools del servidor MCP "github"
+ *   mcp__github__get_*   tools MCP por comodín (solo `*`, y solo en nombres mcp__)
  */
 export interface Rule {
   raw: string;
@@ -20,8 +22,8 @@ export interface Rule {
 }
 
 export function parseRule(raw: string): Rule {
-  const m = /^([A-Za-z_][\w-]*)(?:\((.*)\))?$/s.exec(raw.trim());
-  if (!m) throw new Error(`Invalid permission rule: ${raw}`);
+  const m = /^([A-Za-z_][\w*-]*)(?:\((.*)\))?$/s.exec(raw.trim());
+  if (!m || (m[1]!.includes("*") && !m[1]!.startsWith("mcp__"))) throw new Error(`Invalid permission rule: ${raw}`);
   const specifier = m[2]?.trim();
   return { raw, tool: m[1]!, ...(specifier ? { specifier } : {}) };
 }
@@ -73,4 +75,14 @@ export function matchPath(pattern: string, absPath: string, workspace: string): 
   // Un directorio sin glob cubre todo su contenido.
   if (!/[*?]/.test(p)) return absPath === p || absPath.startsWith(p.endsWith("/") ? p : `${p}/`);
   return globToRegExp(p).test(absPath);
+}
+
+/**
+ * Si una regla sin especificador cubre una tool MCP: el nombre exacto, el servidor entero (`mcp__<servidor>`)
+ * o un comodín (`mcp__<servidor>__get_*`, `mcp__*`).
+ */
+export function matchMcpRule(ruleTool: string, toolName: string, server: string): boolean {
+  if (ruleTool === toolName || ruleTool === `mcp__${server}`) return true;
+  if (!ruleTool.includes("*")) return false;
+  return new RegExp(`^${ruleTool.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`).test(toolName);
 }
