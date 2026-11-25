@@ -164,6 +164,13 @@ const subagentLine = (e: AgentEvent, tag: string): string | null => {
   }
 };
 
+/** Prompt de cada llamada a Agent, por id de tool_use. */
+const agentPrompts = new Map<string, string>();
+const oneLine = (s: string, max: number) => {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+};
+
 let atLineStart = true;
 const writeLine = (line: string) => {
   if (!atLineStart) process.stdout.write("\n");
@@ -185,9 +192,11 @@ bus.on((e: AgentEvent) => {
     return;
   }
   const isAgentCall = (e.t === "tool_start" || e.t === "tool_end") && e.call.name === "Agent";
+  // El prompt que escribe el principal es todo lo que sabrá el subagente: se guarda para enseñarlo al arrancar.
+  if (isAgentCall && e.t === "tool_start") agentPrompts.set(e.call.id, String((e.call.input as { prompt?: unknown }).prompt ?? ""));
   const line =
     e.t === "subagent_start"
-      ? `> Agent ${e.type}·${e.id}: ${e.description}`
+      ? `> Agent ${e.type}·${e.id}: ${e.description}\n  prompt: ${oneLine(agentPrompts.get(e.toolUseId) ?? "", 300)}`
       : e.t === "subagent_end"
         ? `  < ${e.type}·${e.id} ${e.reason === "end_turn" ? "informe listo" : e.reason}: ${e.turns} turnos, ${e.toolCalls} llamadas, ` +
           `contexto máximo ${k(e.peakContext)}, ${k(e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens)} tokens de entrada, ` +
