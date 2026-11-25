@@ -206,7 +206,9 @@ bus.on((e: AgentEvent) => {
           : isAgentCall && e.t === "tool_end"
             ? e.result.content.startsWith("Started agent·")
               ? null
-              : e.result.is_error && !e.result.content.startsWith("[subagent")
+              : /^agent·\S+ is already running/.test(e.result.content)
+                ? `  ${e.result.content.split(" ")[0]} ya está en marcha con la misma tarea: no se relanza`
+                : e.result.is_error && !e.result.content.startsWith("[subagent")
                 ? `  error: ${e.result.content.split("\n")[0]}`
                 : `  al principal vuelve un informe de ~${k(Math.ceil(e.result.content.length / 4))} tokens`
             : null;
