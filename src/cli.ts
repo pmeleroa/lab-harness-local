@@ -9,6 +9,7 @@ import type { PermissionMode } from "./policy/engine.js";
 import { PERMISSION_MODES, SANDBOX_CHOICES, loadSettings } from "./policy/settings.js";
 import type { SandboxChoice } from "./policy/sandbox/index.js";
 import type { AgentEvent } from "./core/events.js";
+import { type Usage, addUsage, emptyUsage } from "./providers/canonical.js";
 import { VERSION } from "./version.js";
 
 const HELP = `lab-harness-local ${VERSION}: un harness para agentes de código en terminal
@@ -22,12 +23,14 @@ Uso: npm run dev -- [opciones] "<pregunta>"
       --context-window <n>  ventana de contexto del modelo, en tokens (defecto: 4096)
       --max-turns <n>     turnos máximos del run (defecto: 25)
       --permission-mode <modo>  default (pregunta antes de escribir) | acceptEdits (escribe dentro del
-                          workspace) | bypass (no pregunta; un deny sigue ganando)
+                          workspace) | plan (solo lee: deniega todo lo que preguntaría) | bypass (no
+                          pregunta; un deny sigue ganando)
       --allow <regla>     regla allow extra, repetible: --allow "Edit(src/**)"
       --deny <regla>      regla deny extra, repetible: --deny "Edit(**/.env*)"
       --sandbox <modo>    auto (defecto: bwrap en Linux, sandbox-exec en macOS) | bwrap | seatbelt |
                           none (los comandos corren con todos tus permisos)
       --no-network        sin red dentro del sandbox
+      --no-agents         sin subagentes (quita la tool Agent)
   -h, --help
 `;
 
@@ -44,6 +47,7 @@ const { values, positionals } = parseArgs({
     deny: { type: "string", multiple: true, default: [] },
     sandbox: { type: "string" },
     "no-network": { type: "boolean" },
+    "no-agents": { type: "boolean" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -68,7 +72,7 @@ if (contextWindow !== undefined && (!Number.isInteger(contextWindow) || contextW
 
 const requestedMode = values["permission-mode"];
 if (requestedMode && !PERMISSION_MODES.has(requestedMode)) {
-  process.stderr.write("--permission-mode debe ser default, acceptEdits o bypass\n");
+  process.stderr.write("--permission-mode debe ser default, acceptEdits, plan o bypass\n");
   process.exit(2);
 }
 
@@ -91,8 +95,9 @@ const approver: Approver = rl ? ttyApprover(rl) : denyAllApprover;
 const sandboxChoice = (requestedSandbox as SandboxChoice | undefined) ?? settings.sandbox.mode;
 const network = values["no-network"] ? "none" : settings.sandbox.network;
 
-const { agent, bus, workspace, model, policy, bash, skills, mcp, warnings, endRun, dispose } = await createHarness({
+const { agent, bus, workspace, model, policy, bash, skills, mcp, agents, subagentRuns, warnings, endRun, followUp, dispose } = await createHarness({
   ...(permissionMode ? { permissionMode } : {}),
+  ...(values["no-agents"] ? { agents: false } : {}),
   ...(sandboxChoice ? { sandbox: sandboxChoice } : {}),
   ...(network ? { network } : {}),
   rules: {
@@ -127,14 +132,80 @@ const short = (v: unknown) => {
   return s.length > 100 ? `${s.slice(0, 100)}…` : s;
 };
 
+/** Lo que ocupa un turno: entrada (con caché) y salida. */
+const used = (u: Usage) => u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens + u.outputTokens;
+const ctxLine = (u: Usage) => `ctx ${k(used(u))}/${k(agent.contextWindow)} (${Math.round((used(u) / agent.contextWindow) * 100)}%)`;
+const contextLine = (e: Extract<AgentEvent, { t: "context" }>) =>
+  `~ ${e.action === "cleared" ? `limpiados ${e.count} resultados antiguos` : "conversación compactada"}: ${k(e.before)} -> ${k(e.after)} tokens`;
+
+/**
+ * Un evento de un subagente, sangrado y con su etiqueta: sus tools, los errores, su contexto. Su texto no se enseña:
+ * es para el principal, que solo recibe el informe final.
+ */
+const subagentLine = (e: AgentEvent, tag: string): string | null => {
+  const pre = `  · ${tag}`;
+  switch (e.t) {
+    case "tool_start":
+      return `${pre} > ${e.call.name} ${short(e.call.input)}`;
+    case "tool_end":
+      return e.result.is_error ? `${pre}   error: ${e.result.content.split("\n")[0]!.slice(0, 120)}` : null;
+    case "hook_blocked":
+      return `${pre} x bloqueado por un hook: ${e.message}`;
+    case "permission_decision":
+      return e.decision === "deny" && (e.source === "policy" || !canAsk) ? `${pre} x ${e.call.name} denegado: ${e.reason}` : null;
+    case "warning":
+      return `${pre} ! ${e.message}`;
+    case "context":
+      return `${pre} ${contextLine(e)}`;
+    case "turn_end":
+      return `${pre} ${e.truncated ? "ctx ? (el servidor recortó la conversación)" : ctxLine(e.usage)}`;
+    default:
+      return null;
+  }
+};
+
 let atLineStart = true;
+const writeLine = (line: string) => {
+  if (!atLineStart) process.stdout.write("\n");
+  process.stderr.write(`${line}\n`);
+  atLineStart = true;
+};
+
 bus.on((e: AgentEvent) => {
+  // Uno en segundo plano: nada de lo que hace (su resultado llega como aviso). Lo cuentan task_start y task_end.
+  if (e.agent?.background || ((e.t === "subagent_start" || e.t === "subagent_end") && e.background)) return;
+  if (e.agent) {
+    const line = subagentLine(e, `${e.agent.type}·${e.agent.id}`);
+    if (line) writeLine(line);
+    return;
+  }
   if (e.t === "text_delta") {
     process.stdout.write(e.text);
     atLineStart = e.text.endsWith("\n");
     return;
   }
+  const isAgentCall = (e.t === "tool_start" || e.t === "tool_end") && e.call.name === "Agent";
   const line =
+    e.t === "subagent_start"
+      ? `> Agent ${e.type}·${e.id}: ${e.description}`
+      : e.t === "subagent_end"
+        ? `  < ${e.type}·${e.id} ${e.reason === "end_turn" ? "informe listo" : e.reason}: ${e.turns} turnos, ${e.toolCalls} llamadas, ` +
+          `contexto máximo ${k(e.peakContext)}, ${k(e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens)} tokens de entrada, ` +
+          `${k(e.usage.outputTokens)} de salida, ${Math.round(e.durationMs / 1000)} s`
+        : isAgentCall && e.t === "tool_start"
+          ? null // lo cuenta subagent_start, que ya sabe su id; o task_start, si va en segundo plano
+          : isAgentCall && e.t === "tool_end"
+            ? e.result.content.startsWith("Started agent·")
+              ? null
+              : e.result.is_error && !e.result.content.startsWith("[subagent")
+                ? `  error: ${e.result.content.split("\n")[0]}`
+                : `  al principal vuelve un informe de ~${k(Math.ceil(e.result.content.length / 4))} tokens`
+            : null;
+  if (line !== null || e.t === "subagent_start" || e.t === "subagent_end" || isAgentCall) {
+    if (line !== null) writeLine(line);
+    return;
+  }
+  const other =
     e.t === "permission_decision"
       ? // Una regla que deniega se ve siempre. Un `ask` que se convierte en `deny` solo cuando no había nadie a quien
         // preguntar: con terminal, el usuario ya vio el prompt.
@@ -157,21 +228,20 @@ bus.on((e: AgentEvent) => {
             : e.t === "warning"
               ? `! ${e.message}`
               : e.t === "context"
-                ? `~ ${e.action === "cleared" ? `limpiados ${e.count} resultados antiguos` : "conversación compactada"}: ${k(e.before)} -> ${k(e.after)} tokens`
+                ? contextLine(e)
                 : e.t === "turn_end"
                   ? e.truncated
                     ? "ctx ? (el servidor recortó la conversación)"
-                    : `ctx ${k(e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens + e.usage.outputTokens)}/${k(agent.contextWindow)} (${Math.round(((e.usage.inputTokens + e.usage.cacheReadTokens + e.usage.cacheWriteTokens + e.usage.outputTokens) / agent.contextWindow) * 100)}%)`
+                    : ctxLine(e.usage)
                   : null;
-  if (line === null) return;
-  if (!atLineStart) process.stdout.write("\n");
-  process.stderr.write(`${line}\n`);
-  atLineStart = true;
+  if (other !== null) writeLine(other);
 });
 
 process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\nsandbox: ${bash.sandboxName}${network !== "none" ? "" : bash.sandboxName === "none" ? " (--no-network no tiene efecto sin sandbox)" : ", sin red"}\n`);
 // Lo que amplía al harness sin tocar su código: qué skills ve el modelo y qué hooks del repositorio se ejecutan.
 if (skills.length) process.stderr.write(`skills: ${skills.map((s) => (s.modelInvocable ? s.name : `${s.name} (no invocable)`)).join(", ")}\n`);
+// Los tipos de .harness/agents son contenido del repositorio: instrucciones y tools que el modelo puede lanzar.
+if (agents.length) process.stderr.write(`subagentes: ${agents.map((a) => (a.source === "proyecto" ? `${a.name} (de .harness/agents)` : a.name)).join(", ")}\n`);
 const hookList = (["PreToolUse", "PostToolUse"] as const).flatMap((ev) => (settings.hooks[ev] ?? []).map((h) => `${ev}${h.matcher ? `(${h.matcher})` : ""}: ${h.command}`));
 if (hookList.length) {
   process.stderr.write(`hooks (código del repositorio, ${bash.sandboxName === "none" ? "SIN sandbox" : "dentro del sandbox"}):\n`);
@@ -194,13 +264,39 @@ rl?.once("SIGINT", () => {
   process.exit(130);
 });
 
-const result = await agent.run(prompt, ctl.signal);
-// Un run de la CLI no tiene turno siguiente: lo que siga en segundo plano se mata (y se avisa).
+let result = await agent.run(prompt, ctl.signal);
+// El principal: lo de todos sus runs (el de la pregunta y los que lanzan los avisos de subagentes en segundo plano).
+let totals = { turns: result.turns, toolCalls: result.toolCalls, usage: result.usage, peakContext: result.peakContext };
+// Subagentes en segundo plano: se espera a sus informes y se hace otro run con ellos (con un límite de rondas).
+if (result.reason === "end_turn") {
+  const last = await followUp(
+    async (p) => {
+      const r = await agent.run(p, ctl.signal);
+      totals = { turns: totals.turns + r.turns, toolCalls: totals.toolCalls + r.toolCalls, usage: addUsage(totals.usage, r.usage), peakContext: Math.max(totals.peakContext, r.peakContext) };
+      return r;
+    },
+    {
+      onWait: (ps) => writeLine(`… esperando a ${ps.map((p) => `${p.kind}·${p.id}`).join(", ")}`),
+      onRound: (ns) => writeLine(`<- ${ns.map((n) => `${n.task.kind}·${n.task.id}`).join(", ")}: otro run con su aviso`),
+    },
+  );
+  if (last) result = last;
+}
+// Un run de la CLI no tiene turno siguiente: los comandos que sigan en segundo plano se matan (y se avisa).
 await endRun();
 if (!atLineStart) process.stdout.write("\n");
-process.stderr.write(
-  `\n[${result.reason}] ${result.turns} turnos, ${result.toolCalls} llamadas, ${result.usage.inputTokens} tokens de entrada, ${result.usage.outputTokens} de salida\n`,
-);
+/** Entrada total (lo que se envió, también lo que el servidor sirvió de su caché) y salida. */
+const tokens = (u: Usage) =>
+  `${u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens} tokens de entrada${u.cacheReadTokens ? ` (${u.cacheReadTokens} de caché)` : ""}, ${u.outputTokens} de salida`;
+process.stderr.write(`\n[${result.reason}] ${totals.turns} turnos, ${totals.toolCalls} llamadas, ${tokens(totals.usage)}, contexto máximo ${totals.peakContext}\n`);
+// Lo que gastaron los subagentes va aparte: no ocupó la ventana del principal, pero se pagó igual.
+if (subagentRuns.length) {
+  const u = subagentRuns.reduce((acc, r) => addUsage(acc, r.usage), emptyUsage());
+  process.stderr.write(
+    `[subagentes] ${subagentRuns.length} (${subagentRuns.map((r) => `${r.type}·${r.id}`).join(", ")}), ${tokens(u)}, ` +
+      `contexto máximo ${Math.max(...subagentRuns.map((r) => r.peakContext))}\n`,
+  );
+}
 if (result.error) process.stderr.write(`${result.error}\n`);
 rl?.close();
 dispose();

@@ -18,9 +18,10 @@ export class FakeProvider implements Provider {
     /**
      * `truncate` imita a un servidor que recorta lo que no cabe y responde con normalidad (como Ollama con HTTP 200):
      * si la petición estimada pasa de `window`, informa de un uso que no crece. `collapse`: solo sobrevive lo mínimo;
-     * `plateau`: se queda cerca de la ventana.
+     * `plateau`: se queda cerca de la ventana. `delayMs` retrasa cada respuesta (subagentes en paralelo y en
+     * segundo plano); un abort la corta.
      */
-    private opts: { truncate?: { window: number; mode?: "collapse" | "plateau" } } = {},
+    private opts: { truncate?: { window: number; mode?: "collapse" | "plateau" }; delayMs?: number } = {},
   ) {}
 
   /** El uso informado es la estimación de la petición, como el de un servidor real. */
@@ -31,10 +32,19 @@ export class FakeProvider implements Provider {
     return t.mode === "plateau" ? Math.floor(t.window * 0.9) : 63;
   }
 
-  async *stream(req: CanonicalRequest, _signal: AbortSignal): AsyncIterable<ProviderEvent> {
+  async *stream(req: CanonicalRequest, signal: AbortSignal): AsyncIterable<ProviderEvent> {
     // Copia profunda: el loop muta `messages` después.
     this.requests.push(structuredClone(req));
     const { content, stopReason } = this.script(req, ++this.turn);
+    if (this.opts.delayMs) {
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, this.opts.delayMs);
+        signal.addEventListener("abort", () => {
+          clearTimeout(t);
+          reject(new Error("aborted"));
+        });
+      });
+    }
     for (const b of content) if (b.type === "text") yield { t: "text_delta", text: b.text };
     const message: Message = { role: "assistant", content };
     const hasTools = content.some((b) => b.type === "tool_use");

@@ -28,7 +28,7 @@ import type { HookRunner } from "../hooks/runner.js";
 import type { PolicyEngine } from "../policy/engine.js";
 import { FileStateCache } from "../tools/file-state.js";
 import type { ToolRegistry } from "../tools/registry.js";
-import type { AgentEvent, AgentState, EventBus, RunEndReason } from "./events.js";
+import type { AgentEvent, AgentRef, AgentState, EventBus, RunEndReason } from "./events.js";
 
 export interface AgentConfig {
   model: string;
@@ -62,6 +62,8 @@ export interface ApprovalRequest {
   call: ToolUseBlock;
   reason: string;
   suggestedRule: string | null;
+  /** El subagente que pide permiso; ausente si es el agente principal. */
+  agent?: AgentRef;
 }
 
 export type Approver = (req: ApprovalRequest) => Promise<ApprovalAnswer>;
@@ -69,8 +71,11 @@ export type Approver = (req: ApprovalRequest) => Promise<ApprovalAnswer>;
 /** Sin terminal (CI, `< /dev/null`): todo lo que requiera confirmación se deniega. Fallar cerrado. */
 export const denyAllApprover: Approver = async () => ({ kind: "deny", feedback: "No interactive user available." });
 
-/** Un solo prompt de permiso a la vez, aunque las herramientas de lectura corran en paralelo. */
-class ApprovalLock {
+/**
+ * Un solo prompt de permiso a la vez, aunque las herramientas de lectura (o varios subagentes) corran en paralelo.
+ * El agente principal y sus subagentes comparten el mismo lock.
+ */
+export class ApprovalLock {
   private tail: Promise<unknown> = Promise.resolve();
 
   run<T>(fn: () => Promise<T>): Promise<T> {
@@ -92,6 +97,10 @@ export interface AgentDeps {
   notifications?: { drain(): Block[] };
   /** Hooks PreToolUse y PostToolUse, dentro del sandbox. */
   hooks?: HookRunner;
+  /** Compartido con los subagentes para que sus prompts de permiso no se pisen. */
+  approvalLock?: ApprovalLock;
+  /** Identidad del agente si es un subagente (va en las peticiones de permiso). */
+  ref?: AgentRef;
 }
 
 export interface RunResult {
@@ -101,6 +110,8 @@ export interface RunResult {
   usage: Usage;
   turns: number;
   toolCalls: number;
+  /** Mayor contexto ocupado en un turno de este run (entrada + salida). */
+  peakContext: number;
   error?: string;
 }
 
@@ -125,12 +136,14 @@ export class Agent {
 
   /** Lo que el modelo ha leído en este run: Edit y Write lo exigen antes de modificar un fichero. */
   private fileState = new FileStateCache();
-  private approvalLock = new ApprovalLock();
+  private readonly approvalLock: ApprovalLock;
 
   constructor(
     private deps: AgentDeps,
     private cfg: AgentConfig,
-  ) {}
+  ) {
+    this.approvalLock = deps.approvalLock ?? new ApprovalLock();
+  }
 
   get state(): AgentState {
     return this._state;
@@ -160,19 +173,22 @@ export class Agent {
    * Ejecuta un turno de usuario completo: modelo -> herramientas -> modelo ... hasta end_turn
    * o hasta que salte un límite. Puede llamarse varias veces (conversación multi-turno).
    */
-  async run(prompt: string, signal: AbortSignal = new AbortController().signal): Promise<RunResult> {
-    this.pushUser([{ type: "text", text: prompt }]);
+  async run(prompt: string | Block[], signal: AbortSignal = new AbortController().signal): Promise<RunResult> {
+    // Bloques en lugar de texto: los avisos de subagentes en segundo plano, como prompt de un run más (headless).
+    const content: Block[] = typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt;
+    this.pushUser(content);
 
     const failures = new Map<string, number>();
     let usage = emptyUsage();
     let toolCalls = 0;
+    let peakContext = 0;
     let lastText = "";
     let retriedEmpty = false;
 
     const end = (reason: RunEndReason, turns: number, error?: string): RunResult => {
       this.setState(reason === "aborted" ? "aborted" : reason === "error" ? "error" : "done");
       this.emit({ t: "run_end", reason, usage, turns });
-      return { reason, text: lastText, usage, turns, toolCalls, ...(error ? { error } : {}) };
+      return { reason, text: lastText, usage, turns, toolCalls, peakContext, ...(error ? { error } : {}) };
     };
 
     for (let turn = 1; turn <= this.cfg.maxTurns; turn++) {
@@ -191,6 +207,8 @@ export class Agent {
         stopReason = res.stopReason;
         turnUsage = res.usage;
         usage = addUsage(usage, res.usage);
+        const u = res.usage;
+        peakContext = Math.max(peakContext, u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens + u.outputTokens);
         this.emit({ t: "turn_end", turn, usage: res.usage, ...(res.truncated ? { truncated: true } : {}) });
         // El servidor recortó la conversación y respondió igual: lo dicho no parte de la tarea. Se descarta la
         // respuesta, la historia sigue completa en `messages` y el run acaba con nombre en vez de pasar por normal.
@@ -443,7 +461,12 @@ export class Agent {
         if (again.kind === "allow") return { kind: "allow_once" };
         if (again.kind === "deny") return { kind: "deny", feedback: again.reason };
         this.emit({ t: "permission_request", call, reason: decision.reason });
-        return this.deps.approver({ call, reason: decision.reason, suggestedRule: this.deps.policy.suggestRule(call, target) });
+        return this.deps.approver({
+          call,
+          reason: decision.reason,
+          suggestedRule: this.deps.policy.suggestRule(call, target),
+          ...(this.deps.ref ? { agent: this.deps.ref } : {}),
+        });
       });
       if (signal.aborted) return result(INTERRUPTED, true);
       allowed = answer.kind !== "deny";

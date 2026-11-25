@@ -11,10 +11,12 @@ export function parseAnswer(raw: string, suggestedRule: string | null): Approval
 
 /** Approver de línea: pregunta por stderr y lee de stdin. El texto libre vuelve al modelo como motivo del «no». */
 export function ttyApprover(rl: readline.Interface): Approver {
-  return async ({ call, reason, suggestedRule }: ApprovalRequest) => {
+  return async ({ call, reason, suggestedRule, agent }: ApprovalRequest) => {
     const input = (call.input ?? {}) as { file_path?: string; path?: string; command?: string };
     const target = input.command ?? input.file_path ?? input.path ?? "";
-    process.stderr.write(`\n? ${call.name} ${target}\n  ${reason}\n`);
+    // Si pregunta un subagente, se dice cuál: el usuario no vio su conversación.
+    const who = agent ? `${agent.type}·${agent.id} pide ` : "";
+    process.stderr.write(`\n? ${who}${call.name} ${target}\n  ${reason}\n`);
     const always = suggestedRule ? ` / [a] siempre: ${suggestedRule}` : "";
     const ans = await rl.question(`  [y] sí${always} / [n] no (o escribe por qué): `);
     return parseAnswer(ans, suggestedRule);
