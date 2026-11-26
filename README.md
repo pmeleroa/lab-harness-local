@@ -376,7 +376,7 @@ jq -r --argjson r "$R" 'if .type == "task" then "\(.id)  \(.status) \(.exitCode 
 Quién aprobó cada acción, en el principal y en sus subagentes. Sin lo que decide sola la política; para verlo todo, quita `and .origin != "policy"`:
 
 ```bash
-jq -r 'select(.type == "approval" and .origin != "policy") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback] | map(select(. != null)) | join("  "))' "$S" "${S%.jsonl}"/agents/*.jsonl 2>/dev/null
+jq -r 'select(.type == "approval" and .origin != "policy") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback] | map(select(. != null)) | join("  "))' "$S" $(ls "${S%.jsonl}"/agents/*.jsonl 2>/dev/null)
 ```
 
 La salida de estas consultas sobre la sesión del ejemplo está en `examples/salidas/sesiones-consultas.txt`. Para dejarlo como estaba, borra `~/tienda-demo` y su carpeta en `~/.harness/sessions`.

@@ -38,7 +38,7 @@ call_x75ccs98  error  $ git add -A
 call_j09hvwlp  error  $ git add -A && git commit -m 'Add itemCount function and test for cart empty state'
 
 # Quién aprobó cada acción, sin lo que decide sola la política
-$ jq -r 'select(.type == "approval" and .origin != "policy") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback] | map(select(. != null)) | join("  "))' "$S" "${S%.jsonl}"/agents/*.jsonl 2>/dev/null
+$ jq -r 'select(.type == "approval" and .origin != "policy") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback] | map(select(. != null)) | join("  "))' "$S" $(ls "${S%.jsonl}"/agents/*.jsonl 2>/dev/null)
 call_cmwyu6m1  Edit  allow  user  once
 call_p64c4lkr  Write  allow  user  once
 call_yi7ni766  Bash  deny  user  no  no: haz git add -A y git commit en dos llamadas a Bash distintas, como te pedí
@@ -57,7 +57,7 @@ call_j09hvwlp  Bash  deny  hook
 
 # Lo mismo con la política, en la sesión del explore: el principal y su agents/
 $ S=$(ls ~/.harness/sessions/*/742e58fb*.jsonl)
-$ jq -r 'select(.type == "approval") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback, .reason] | map(select(. != null)) | join("  "))' "$S" "${S%.jsonl}"/agents/*.jsonl 2>/dev/null
+$ jq -r 'select(.type == "approval") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback, .reason] | map(select(. != null)) | join("  "))' "$S" $(ls "${S%.jsonl}"/agents/*.jsonl 2>/dev/null)
 call_sagbr7f6  Agent  allow  policy  subagent explore: its tools go through its own policy
 call_g4vbkv35  Read  allow  policy  read inside workspace
 call_cc79osdu  Read  allow  policy  read inside workspace
