@@ -2,7 +2,7 @@
 
 Un harness para agentes de código en terminal, construido parte a parte para entender cómo funcionan estos agentes por dentro. Acompaña a la serie «Asistente de código local» de [pablomeleroalonso.me](https://pablomeleroalonso.me).
 
-Esta versión (tag `parte-7`) ya **delega**: un bucle con streaming, un contrato de inferencia con un adaptador a `/v1/chat/completions`, gestión del contexto (limpiar y compactar contra la ventana, y detectar cuando el servidor recorta la conversación sin avisar), herramientas para leer, buscar y escribir (`Read`, `Glob`, `Grep`, `Write` y `Edit`), `Bash` con procesos en segundo plano (`BashOutput` y `KillShell`), un sistema de permisos con reglas de ruta y de comando, un sandbox del sistema operativo alrededor de cada comando, tres formas de extenderlo (skills, hooks y servidores MCP por stdio) y, nuevo en esta parte, subagentes: la tool `Agent` lanza otro bucle con su propia conversación, sus herramientas y un modo de permisos igual o más restrictivo, y al agente principal solo le vuelve su informe. También es nuevo el modo `plan`, que solo lee. Cada parte de la serie añade commits y un tag nuevo.
+Esta versión (tag `parte-8`) ya **recuerda**: un bucle con streaming, un contrato de inferencia con un adaptador a `/v1/chat/completions`, gestión del contexto (limpiar y compactar contra la ventana, y detectar cuando el servidor recorta la conversación sin avisar), herramientas para leer, buscar y escribir (`Read`, `Glob`, `Grep`, `Write` y `Edit`), `Bash` con procesos en segundo plano (`BashOutput` y `KillShell`), un sistema de permisos con reglas de ruta y de comando, un sandbox del sistema operativo alrededor de cada comando, tres formas de extenderlo (skills, hooks y servidores MCP por stdio) subagentes (la tool `Agent` lanza otro bucle con su propia conversación, sus herramientas y un modo de permisos igual o más restrictivo, y al agente principal solo le vuelve su informe), el modo `plan`, que solo lee, y, nuevo en esta parte, sesiones: cada ejecución guarda un transcript fuera del workspace, que se retoma con `--continue`, `--resume` y `--fork-session`, y que dice quién decidió cada llamada. Cada parte de la serie añade commits y un tag nuevo.
 
 | Tag | Qué añade |
 |---|---|
@@ -12,12 +12,14 @@ Esta versión (tag `parte-7`) ya **delega**: un bucle con streaming, un contrato
 | `parte-5` | `Bash`, las reglas de comando y el sandbox. |
 | `parte-6` | Skills, hooks y servidores MCP por stdio, dentro del sandbox. |
 | `parte-7` | Subagentes (`Agent`), en paralelo y en segundo plano, y el modo `plan`. |
+| `parte-8` | Sesiones: el transcript JSONL, retomar y bifurcar, y el registro `approval`. |
 
 ## Prerrequisitos
 
 - Linux o macOS. En Windows, desde WSL2.
 - Node.js 22 o superior y npm.
 - [ripgrep](https://github.com/BurntSushi/ripgrep#installation) (`rg`) en el `PATH`: lo usan `Glob` y `Grep`.
+- [jq](https://jqlang.org/download/), para leer las sesiones: `sudo apt install jq` en Debian y Ubuntu, `brew install jq` en macOS.
 - En Linux (y WSL2), [bubblewrap](https://github.com/containers/bubblewrap) para el sandbox: `sudo apt install bubblewrap` en Debian y Ubuntu. En macOS se usa `sandbox-exec`, que viene con el sistema.
 - Para el ejemplo de MCP, el binario de [github-mcp-server](https://github.com/github/github-mcp-server) y un token de GitHub (ver «Extensibilidad»).
 - Un servidor compatible con `/v1/chat/completions` con un modelo que admita herramientas. Los ejemplos usan [Ollama](https://ollama.com) y `qwen2.5:7b`.
@@ -29,7 +31,7 @@ ollama pull qwen2.5:7b
 ## Instalación
 
 ```bash
-git clone --branch parte-7 https://github.com/pmeleroa/lab-harness-local.git
+git clone --branch parte-8 https://github.com/pmeleroa/lab-harness-local.git
 cd lab-harness-local
 npm install
 npm test
@@ -72,6 +74,9 @@ npm run dev -- --workspace examples/demo "Usa Bash para ejecutar git status y di
 | `--sandbox <modo>` | `auto` (bwrap en Linux, `sandbox-exec` en macOS), `bwrap`, `seatbelt` o `none`. Defecto: `auto`. |
 | `--no-network` | Sin red dentro del sandbox. |
 | `--no-agents` | Sin subagentes: quita la tool `Agent`. |
+| `-c, --continue` | Retoma la sesión más reciente de este workspace (ver «Sesiones»). |
+| `-r, --resume <id>` | Retoma una sesión concreta, por id o prefijo. |
+| `--fork-session` | Con `-c` o `-r`: sigue en una copia de la sesión; la original no cambia. |
 
 ## Cómo termina un run
 
@@ -141,7 +146,7 @@ Las reglas de comando deciden cuándo preguntar:
 Una regla mira el comando, no lo que hace: `Bash(npm run *)` deja pasar cualquier script de `package.json`. Por eso cada comando corre además dentro de un sandbox del sistema operativo (`src/policy/sandbox/index.ts`):
 
 - La raíz del sistema de ficheros es de solo lectura; solo se escribe en el workspace y en un directorio temporal de la sesión. En Linux, `/tmp` es un `tmpfs` vacío.
-- Las credenciales habituales (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.npmrc`, `~/.netrc`…) no se ven.
+- Las credenciales habituales (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.npmrc`, `~/.netrc`…) y las sesiones (`~/.harness/sessions`) no se ven.
 - Con `--no-network`, sin red.
 - En Linux, bubblewrap con su propio espacio de procesos (`--unshare-pid`) y su propia sesión de terminal (`--new-session`). En macOS, `sandbox-exec` con un perfil que deniega escribir fuera, leer lo oculto y, sin red, la red.
 
@@ -251,7 +256,7 @@ En la salida, cada subagente aparece como `> Agent explore·<id>`, con el prompt
 
 Ten cuidado con los repositorios ajenos: sus `.harness/agents` se cargan al arrancar. La cabecera los lista en `subagentes:` con «(de .harness/agents)».
 
-Diferencias con `harness`: el lab solo lee las definiciones del proyecto (sin capa de usuario ni `.claude/agents`), no guarda transcripts de los subagentes, no tiene `mcp.readOnly` (la lista de tools MCP permitidas en `plan`) ni el comando `/agents`.
+Diferencias con `harness`: el lab solo lee las definiciones del proyecto (sin capa de usuario ni `.claude/agents`), no tiene `mcp.readOnly` (la lista de tools MCP permitidas en `plan`) ni el comando `/agents`.
 
 ### El ejemplo: leer seis ficheros, con y sin subagente
 
@@ -272,6 +277,112 @@ node examples/comprobar-delegacion.mjs con.txt con-traza.txt
 
 Compara la última línea de cada traza: el contexto máximo del principal y, con subagente, la línea `[subagentes]`. Las salidas y las cifras de las ejecuciones están en `examples/salidas/`. Para dejarlo como estaba, borra `~/tienda-planes` y los cuatro ficheros.
 
+## Sesiones
+
+Cada ejecución guarda su transcript en `~/.harness/sessions/<workspace>-<hash>/<id>.jsonl`: el nombre del directorio del workspace y 8 caracteres del hash de su ruta real (`tienda-demo-924c9f5d`). Es un fichero al que solo se añade, con un registro JSON por línea, y no existe hasta el primer mensaje. La cabecera del arranque dice cuál es (`sesión: <id>`).
+
+| Registro | Qué guarda |
+|---|---|
+| `meta` | Un arranque: workspace, modelo y ventana de esa invocación y, en un fork, de qué sesión viene. |
+| `message` | Cada mensaje, en el orden en que pasa. Cada `tool_result` se escribe al acabar su llamada. |
+| `approval` | Quién decidió cada llamada y por qué. |
+| `usage` | Los tokens de cada turno. |
+| `compact` | La conversación se compactó. Los mensajes de antes siguen en el fichero. |
+| `subagent` | Un subagente terminó. Su conversación está en `<id>/agents/<uuid>.jsonl`. |
+| `task` | Un comando en segundo plano empezó o terminó, con su exit code. |
+
+Para retomar:
+
+- `-c, --continue` retoma la sesión más reciente del workspace, y `-r, --resume <id>` una concreta, por id o por un prefijo que no sea ambiguo.
+- Con `--fork-session`, la conversación sigue en una copia y la original no cambia. Copia la conversación, no los ficheros: los dos siguen sobre el mismo workspace.
+- Al retomar se lee solo la conversación, desde el último `compact`, y se imprime dónde se quedó: tu último mensaje y la última respuesta.
+- Una llamada que se quedó sin resultado (un Ctrl+C en una pregunta de permiso, un corte) recibe uno sintético, `Session ended before this tool ran.`, que se escribe en el transcript.
+- Si la sesión usó tools MCP que ahora no están, se avisa al arrancar.
+
+Hay cosas que no se restauran, a propósito:
+
+- **El modo de permisos** sale de `--permission-mode` o de `settings.json`.
+- **Las respuestas «siempre»** son reglas de esa sesión. Si quieres que duren, van al `settings.json`.
+- **Lo leído no cuenta**: un `Edit` exige volver a leer el fichero.
+- **El modelo y la ventana** salen de los flags de esta invocación, y cada arranque añade su `meta`.
+
+El registro `approval` va entre la llamada y su resultado, una línea por decisión, también las automáticas. `reason` es el motivo del motor tal cual, y `origin` dice quién decidió:
+
+| `origin` | Quién |
+|---|---|
+| `rule` | Una regla, en `rule`, y de dónde viene, en `ruleSource`: `settings`, `flag` (`--allow`, `--deny`), `session` (un «siempre») o `builtin`. |
+| `mode` | El modo: `bypass`, `acceptEdits` o `plan`. |
+| `policy` | El motor solo: leer dentro del workspace, un comando de solo lectura, lanzar un subagente. |
+| `user` | Tú, con `answer` (`once`, `always` o `no`) y, si dijiste que no con un texto, `feedback`. |
+| `hook` | Un hook `PreToolUse` que bloqueó la llamada, con su mensaje en `reason`. |
+
+Una llamada que no llegó a decidirse (input inválido, una tool que no existe, un corte durante la pregunta) no tiene `approval`. Las decisiones de un subagente van a su propio transcript.
+
+El transcript guarda todo lo que leyó el agente, también lo que leyó fuera del workspace con un permiso de una vez. Por eso:
+
+- **El agente no puede escribir en `~/.harness/sessions` en ningún modo.** Lo impide una regla `deny` integrada que gana también a `bypass`: `session transcripts are read-only for the agent`.
+- **Bash, los hooks y los servidores MCP no lo ven**, porque es una ruta oculta del sandbox. Con `--sandbox none`, Bash podría escribirlo.
+- **Leerlo con `Read`, `Glob` o `Grep` es leer fuera del workspace**: pregunta, y en `plan` se deniega.
+
+No es un registro a prueba de manipulación: es para ti. Crece sin límite, y las sesiones se borran con `rm -r ~/.harness/sessions`. Si mueves el workspace, cambia la clave y `--continue` no encuentra las anteriores, aunque siguen ahí (su `meta` guarda la ruta original).
+
+### El ejemplo: una tarea que no cabe en una invocación
+
+La demo trabaja sobre una copia de `examples/demo` con su propio git, como la de extensibilidad. Las preguntas de permiso se contestan en la terminal: sin terminal se deniegan todas.
+
+```bash
+cp -r examples/demo ~/tienda-demo
+(cd ~/tienda-demo && git init -q && git add -A && git commit -qm "chore: estado inicial")
+npm run -s dev -- --workspace ~/tienda-demo --context-window 8192 \
+  "Añade a src/cart.ts una función exportada itemCount(items: Item[]): number que sume las quantity, crea test/cart.test.ts con un test de itemCount que importe describe, it y expect de vitest, y haz git add -A y git commit en dos llamadas a Bash distintas, siguiendo la convención del proyecto."
+```
+
+Contesta a cada pregunta: `y` para una vez, `a` para siempre, o un texto para decir que no y por qué. Cuando pregunte por el `git commit`, corta con Ctrl+C. Después, retoma y bifurca:
+
+```bash
+npm run -s dev -- --workspace ~/tienda-demo --context-window 8192 --continue \
+  "Sigue: añade a test/cart.test.ts un caso con un carrito vacío y haz el commit."
+npm run -s dev -- --workspace ~/tienda-demo --context-window 8192 --continue --fork-session \
+  "Prueba otra alternativa: cambia itemCount en src/cart.ts para que use un bucle for…of en lugar de reduce."
+```
+
+Con `--continue`, el `git add -A` al que dijiste «siempre» vuelve a preguntar. Las salidas de una ejecución están en `examples/salidas/sesiones-*.txt`.
+
+Para leer lo que pasó, `jq`. Las sesiones del workspace, de la más reciente a la más antigua, con su primer prompt:
+
+```bash
+for f in $(ls -t ~/.harness/sessions/tienda-demo-*/*.jsonl); do jq -rn --arg id "$(basename "$f" .jsonl)" 'first(inputs | select(.type == "message" and .message.role == "user")) | "\($id[:8])  \(.message.content[0].text[:70])"' "$f"; done
+```
+
+Con una sesión en `S`, y en `R` lo que devolvió cada llamada (`ok` o `error`; una denegación también es un error):
+
+```bash
+S=$(ls ~/.harness/sessions/*/<prefijo del id>*.jsonl)
+R=$(jq -s 'map(select(.type == "message") | .message.content[] | select(.type == "tool_result") | {(.tool_use_id): (if .is_error then "error" else "ok" end)}) | add' "$S")
+```
+
+Qué ficheros tocó:
+
+```bash
+jq -r --argjson r "$R" 'select(.type == "message") | .message.content[] | select(.type == "tool_use" and (.name == "Edit" or .name == "Write")) | "\(.id)  \($r[.id] // "-")  \(.name) \(.input.file_path)"' "$S"
+```
+
+Qué comandos lanzó, y los de segundo plano con su exit code:
+
+```bash
+jq -r --argjson r "$R" 'if .type == "task" then "\(.id)  \(.status) \(.exitCode // "")  & \(.description)" else (select(.type == "message") | .message.content[] | select(.type == "tool_use" and .name == "Bash") | "\(.id)  \($r[.id] // "-")  $ \(.input.command)") end' "$S"
+```
+
+Quién aprobó cada acción, en el principal y en sus subagentes. Sin lo que decide sola la política; para verlo todo, quita `and .origin != "policy"`:
+
+```bash
+jq -r 'select(.type == "approval" and .origin != "policy") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback] | map(select(. != null)) | join("  "))' "$S" "${S%.jsonl}"/agents/*.jsonl 2>/dev/null
+```
+
+La salida de estas consultas sobre la sesión del ejemplo está en `examples/salidas/sesiones-consultas.txt`. Para dejarlo como estaba, borra `~/tienda-demo` y su carpeta en `~/.harness/sessions`.
+
+Diferencias con `harness`: el lab guarda las sesiones fuera del workspace y las protege del agente, escribe el registro `approval` y la ventana del arranque en el `meta`, escribe cada `tool_result` al acabar su llamada y escribe la reparación de un corte. `harness` no hace nada de eso todavía. Por su parte, el lab no tiene `/resume`, `/sessions`, `/fork n` ni `/tasks`, ni restaura las tareas terminadas al retomar.
+
 ## Estructura
 
 ```
@@ -281,6 +392,7 @@ src/skills/      carga de skills y catálogo
 src/hooks/       hooks PreToolUse y PostToolUse
 src/mcp/         configuración (.mcp.json) y cliente MCP por stdio
 src/context/     tope, limpieza y compaction, detección de recortes, AGENTS.md
+src/session/     transcript JSONL, retomar, fork y reparación de cortes
 src/providers/   contrato canónico y adaptador a chat completions
 src/tools/       contrato de herramientas, registro, Read, Glob, Grep, Write, Edit, Bash, Skill, Agent y tools MCP, estado de lectura
 src/policy/      motor de permisos, reglas de ruta y de comando, parser de bash, sandbox, approver y settings
@@ -289,7 +401,7 @@ examples/demo/   repositorio pequeño para las preguntas de ejemplo
 examples/delegacion/   tienda con planes de suscripción para la demo de subagentes
 examples/comprobar-delegacion.mjs  comprobación de esa demo (respuesta y traza)
 examples/desbordar.ts  conversación fija que desborda una ventana de 4096
-examples/salidas/      salidas reales de ejecuciones: escritura, seguridad, sandbox, extensibilidad y delegación
+examples/salidas/      salidas reales de ejecuciones: escritura, seguridad, sandbox, extensibilidad, delegación y sesiones
 test/            proveedor simulado, servidor MCP de prueba y tests
 ```
 
