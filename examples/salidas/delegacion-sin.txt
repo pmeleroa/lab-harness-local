@@ -1,0 +1,42 @@
+$ cp -r examples/delegacion ~/tienda-planes
+$ npm run -s dev -- --workspace ~/tienda-planes --context-window 8192 --no-agents "Lee enteros con Read, sin limit ni offset, src/orders/refunds.ts, src/orders/checkout.ts, src/billing/invoices.ts, src/billing/taxes.ts, src/shipping/rates.ts y src/shipping/zones.ts, y resume en una línea qué hace cada uno." < /dev/null
+
+=== stderr
+workspace: ~/tienda-planes
+modelo: qwen2.5:7b
+modo: default (sin .harness/settings.json: ningún deny)
+sandbox: bwrap
+
+ctx 2,0k/8,2k (24%)
+> Read {"file_path":"src/orders/refunds.ts"}
+> Read {"file_path":"src/orders/checkout.ts"}
+> Read {"file_path":"src/billing/invoices.ts"}
+> Read {"file_path":"src/billing/taxes.ts"}
+> Read {"file_path":"src/shipping/rates.ts"}
+> Read {"file_path":"src/shipping/zones.ts"}
+  ok (2 ms)
+  ok (2 ms)
+  ok (2 ms)
+  ok (2 ms)
+  ok (2 ms)
+  ok (2 ms)
+ctx 6,4k/8,2k (79%)
+
+[end_turn] 2 turnos, 6 llamadas, 7958 tokens de entrada (3595 de caché), 486 de salida, contexto máximo 6449
+=== stdout
+Aquí tienes el contenido de cada archivo con una breve descripción de lo que hace:
+
+- **src/orders/refunds.ts**: Define las interfaces para líneas de pedido, pedidos entregados, y decisiones de devolución. Incluye funciones para solicitar devoluciones y calcular cuánto se puede reembolsar, así como el número de días restantes para hacer una devolución.
+
+- **src/orders/checkout.ts**: Implementa el cierre de pedidos, validando el carrito de compras, calculando el costo del envío, y generando un resumen antes de que el cliente pague.
+
+- **src/billing/invoices.ts**: Define el esquema de facturas y proporciona funciones para emitir facturas, determinar si una factura debe ser suspendida, y trabajar con el estatus y el desglose de las facturas.
+
+- **src/billing/taxes.ts**: Define tasas de IVA y funciones para calcular el IVA y el precio con IVA. Incluye también una función para formatear importes en euros.
+
+- **src/shipping/rates.ts**: Define las tarifas y plazos de envío para diferentes niveles de servicio (estándar, express, prioridad), calcula el costo del envío, y proporciona información sobre los plazos de entrega.
+
+- **src/shipping/zones.ts**: Define las zonas de envío (península, islas, UE), y proporciona funciones para determinar la zona a partir del código postal, y si se necesita una declaración aduanera.
+
+$ node examples/comprobar-delegacion.mjs respuesta.txt traza.txt
+ok: nombra los 6 ficheros y los leyó enteros

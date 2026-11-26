@@ -40,3 +40,29 @@ Ejecutadas en el contenedor de la parte 5 (Debian 12, `node:22-bookworm`, `bubbl
 - `extensibilidad-hook.txt`: sin la skill y con el commit pedido literalmente («Ejecuta con Bash: git add src/cart.ts && git commit -m 'arreglos'»), sobre un cambio ya hecho. El hook bloquea `arreglos` antes de pedir permiso, el modelo recibe el motivo y acaba haciendo commit con `fix(cart): arreglos (#12)`: el formato, del mensaje del hook, y el `#12`, de su ejemplo.
 
 La tarea completa se lanzó 10 veces con el mismo prompt: cargó la skill 7 de 10, leyó la issue por MCP 8 de 10, editó `src/cart.ts` 5 de 10 e hizo commit 1 de 10 (el de `extensibilidad-tarea.txt`). El hook no bloqueó nada: el único commit ya cumplía la convención. Las otras nueve se quedaron a medias: tres preguntaron si seguían, tres dejaron el siguiente paso escrito como texto o JSON, dos buscaron la issue en el disco sin encontrarla y una afirmó haber hecho el commit sin hacerlo. El commit pedido literalmente se lanzó 3 veces: en 2 el hook bloqueó `arreglos` (en una el modelo corrigió y en la otra se detuvo) y en 1 el modelo no llegó a intentar el commit. Un modelo de 7B no responde igual en cada ejecución: estas son ejecuciones representativas, no garantías. Lo que los mecanismos hacen siempre lo cubren los tests de `npm test`.
+
+## Parte 7: subagentes
+
+Ejecutadas en el contenedor de las partes 5 y 6 (Debian 12, `node:22-bookworm`, `bubblewrap` 0.8.0, linux/arm64) con `qwen2.5:7b` en Ollama 0.40.18, contra un servidor aparte con `OLLAMA_CONTEXT_LENGTH=8192` (`ollama ps` mostró 8192, runner `llamacpp`, sin `OLLAMA_NUM_PARALLEL`). Cada ejecución partió de una copia nueva de `examples/delegacion`, sin terminal (`< /dev/null`) y con `npm run -s` para que la salida no lleve la cabecera de `npm`. La respuesta (stdout) y la traza (stderr) se guardaron por separado y se comprobaron con `examples/comprobar-delegacion.mjs` (la versión que exige que cada lectura termine sin error en una ruta del workspace da el mismo resultado en las 23 ejecuciones de la tabla y del piloto); en estos ficheros van juntas, primero la traza. Las rutas del contenedor se han cambiado por `~`.
+
+- `delegacion-sin.txt`: con `--no-agents`, el principal lee los seis ficheros en un solo turno y el contexto le sube del 24 % al 79 % de la ventana.
+- `delegacion-con.txt`: con un `explore` en primer plano, el prompt del subagente escrito en la pregunta. El subagente lee los seis ficheros en su propia ventana (hasta el 74 %) y al principal le vuelve el informe: se queda en el 36 %.
+- `delegacion-piloto.txt`: la pregunta de `delegacion-sin.txt` con la tool `Agent` disponible. El modelo no delega, lee él mismo y, con los ~450 tokens de más que ocupa la descripción de `Agent`, la conversación cruza el umbral de compactación (`conversación compactada: 5,6k -> 2,7k tokens`). Tras compactar responde que los ficheros no existen.
+- `delegacion-segundo-plano.txt`: un `explore` en segundo plano mientras el principal escribe `NOTAS.md`. El modelo intenta relanzar el mismo subagente mientras espera y la deduplicación lo para (`ya está en marcha con la misma tarea: no se relanza`). Antes de que llegue el informe, se inventa la respuesta; el informe dice después que no la encontró.
+
+Las dos condiciones se lanzaron 10 veces cada una, con las mismas palabras salvo la delegación:
+
+| | Sin `Agent` (`--no-agents`) | Con `Agent` |
+| --- | --- | --- |
+| Aciertos (nombra los seis y los leyó enteros) | 10 de 10 | 9 de 10 |
+| Contexto máximo del principal | 6.438 a 6.777 (mediana 6.452) | 2.909 a 3.161 (mediana 3.056) |
+| Contexto máximo del subagente | — | 6.024 a 6.259 |
+| Tokens totales, entrada y salida | 8.436 a 8.772 (mediana 8.448) | 13.056 a 13.601 (mediana 13.290) |
+| Segundos | 21 a 36 (mediana 25,5) | 31 a 42 (mediana 36,5) |
+| Limpieza o compactación en el principal | 0 | 0 |
+
+El contexto máximo es la entrada más la salida del turno que más ocupó; la ventana es de 8.192 y, con la reserva para la respuesta, el espacio útil es de 6.144. Los tokens totales incluyen lo que Ollama sirvió de su caché. El fallo con `Agent` es un resumen que se saltó `zones.ts`, aunque el subagente lo había leído.
+
+Antes de esas 20 hubo pilotos, con otras preguntas, que explican por qué las de la tabla son así. Con una pregunta de un dato que exigía seguir los `import` de tres ficheros, 0 de 11: el modelo buscaba con patrones en inglés que no aparecen o leía rutas inventadas. Con la tarea de resumir, si el principal escribía él el prompt del subagente («Explore … and summarize their purpose»), el `explore` no usaba `Read` (0 de 4); sin pedir los ficheros enteros, se leían con `limit` 1, 10 o 20; y con el prompt del subagente escrito, el modelo lo lanzó en segundo plano sin pedírselo (2 de 2), donde la traza no enseña sus lecturas. Con la pregunta de la tabla y `Agent` disponible sin pedir que delegue (3 ejecuciones), no delegó en ninguna: en dos compactó y, después, ninguna de las dos hizo el resumen (una respondió que los ficheros no existían y la otra preguntó si seguía), y en la otra leyó cuatro de los seis.
+
+La demo del segundo plano se lanzó 3 veces: en las 3 arrancó un solo `explore`, el principal escribió `NOTAS.md` antes de que llegara el informe y no repitió la búsqueda; en 1 intentó relanzar el mismo subagente y la deduplicación lo paró. La respuesta correcta (21 días) estaba en el texto final de 2; en ninguna se reescribió `NOTAS.md` con ella, y una afirmó haberlo hecho. Un modelo de 7B no responde igual en cada ejecución: estas son ejecuciones representativas, no garantías. Lo que el harness hace siempre (que solo vuelva el informe, el modo `plan`, los límites, el segundo plano y la deduplicación) lo cubren los tests de `npm test`.

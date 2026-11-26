@@ -31,6 +31,8 @@ export type PermissionTarget =
   /** `cwd`: directorio del shell en el que se ejecutará; las rutas relativas del comando se resuelven desde ahí. */
   | { kind: "command"; command: string; cwd?: string }
   | { kind: "task"; id: string }
+  /** Lanzar un subagente de este tipo: se permite salvo regla `Agent` o `Agent(<tipo>)`. */
+  | { kind: "agent"; type: string }
   /** Tool de un servidor MCP: pregunta salvo regla (`mcp__<servidor>`, `mcp__<servidor>__<tool>` o comodín). */
   | { kind: "mcp"; server: string };
 

@@ -5,7 +5,16 @@ import { isInside, resolveReal } from "../tools/types.js";
 import type { BashParser, SimpleCommand, Token } from "./bash-parser.js";
 import { type Rule, matchCommand, matchMcpRule, matchPath, parseRule } from "./rules.js";
 
-export type PermissionMode = "default" | "acceptEdits" | "bypass";
+export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypass";
+
+/** De más a menos restrictivo. Un subagente nunca puede tener un modo más permisivo que quien lo lanza. */
+const MODE_ORDER: PermissionMode[] = ["plan", "default", "acceptEdits", "bypass"];
+
+/** El más restrictivo de los dos. */
+export function narrowMode(current: PermissionMode, requested?: PermissionMode): PermissionMode {
+  if (!requested) return current;
+  return MODE_ORDER.indexOf(requested) < MODE_ORDER.indexOf(current) ? requested : current;
+}
 
 export type Decision =
   | { kind: "allow"; reason: string }
@@ -77,6 +86,17 @@ export class PolicyEngine {
     return this.cfg.mode;
   }
 
+  /**
+   * Política para un subagente: las mismas reglas, las de sesión copiadas hasta ahora y un modo que solo
+   * puede ser igual o más restrictivo. Lo que el hijo acepte con "siempre" se queda en el hijo.
+   */
+  derive(mode?: PermissionMode): PolicyEngine {
+    const child = new PolicyEngine({ ...this.cfg, mode: narrowMode(this.cfg.mode, mode) }, this.bash);
+    child.rules = this.rules;
+    child.sessionRules = { allow: [...this.sessionRules.allow], ask: [...this.sessionRules.ask], deny: [...this.sessionRules.deny] };
+    return child;
+  }
+
   /** Reglas añadidas en caliente ("siempre" en el prompt). Viven solo en esta sesión. */
   addSessionRule(list: RuleList, raw: string): void {
     this.sessionRules[list].push(parseRule(raw));
@@ -84,6 +104,13 @@ export class PolicyEngine {
 
   evaluate(call: ToolUseBlock, target: PermissionTarget): Decision {
     const d = this.evaluateRaw(call, target);
+    if (this.cfg.mode === "plan" && d.kind !== "deny") {
+      // En `plan` solo se lee: lo que puede escribir se deniega aunque una regla allow lo permita, y lo que
+      // requiere confirmación, también. Las reglas no amplían `plan`, y paralelo y segundo plano cuentan con ello.
+      const write = this.planWrite(target);
+      if (write) return { kind: "deny", reason: `plan mode: ${write}` };
+      if (d.kind === "ask") return { kind: "deny", reason: `plan mode: ${d.reason}` };
+    }
     // `bypass` convierte cualquier `ask` en `allow`; un `deny` no se toca.
     if (this.cfg.mode === "bypass" && d.kind === "ask") return { kind: "allow", reason: `bypass mode (${d.reason})` };
     return d;
@@ -124,12 +151,39 @@ export class PolicyEngine {
     return hit("ask", absPath) && !hit("ask", root);
   }
 
+  /**
+   * Por qué un objetivo puede escribir, o null si solo lee: escribir una ruta, un comando que no es de solo lectura
+   * (o que ejecuta otros) y cualquier redirección a fichero. No mira reglas: es lo que `plan` deniega siempre.
+   */
+  private planWrite(target: PermissionTarget): string | null {
+    if (target.kind === "path") return target.access === "write" ? `write ${target.path}` : null;
+    if (target.kind !== "command") return null;
+    const parsed = this.bash.parse(target.command);
+    if (parsed.problems[0]) return parsed.problems[0];
+    for (const c of parsed.commands) {
+      const opaque = opaqueReason(c.argv);
+      if (opaque) return `${opaque}: ${c.text}`;
+      if (!isReadOnly(c.argv)) return `run: ${c.text}`;
+    }
+    const w = parsed.writes[0];
+    return w ? `redirect writes ${w.value}` : null;
+  }
+
   private evaluateRaw(call: ToolUseBlock, target: PermissionTarget): Decision {
     switch (target.kind) {
       case "path":
         return this.evaluatePath(call.name, target.path, target.access);
       case "command":
         return this.evaluateCommand(call.name, target.command, target.cwd ?? this.cfg.workspace);
+      case "agent":
+        // Lanzar no pregunta: cada cosa que haga el subagente pasa por su propia política. `Agent` o
+        // `Agent(<tipo>)` en una regla sí cuentan.
+        return (
+          this.byRules((r) => r.tool === call.name && (!r.specifier || r.specifier === target.type)) ?? {
+            kind: "allow",
+            reason: `subagent ${target.type}: its tools go through its own policy`,
+          }
+        );
       case "task":
         return this.byRules((r) => r.tool === call.name && !r.specifier) ?? { kind: "allow", reason: "own background task" };
       case "mcp":
@@ -137,12 +191,17 @@ export class PolicyEngine {
     }
   }
 
-  /** Por defecto preguntan. Lo que declare el servidor (readOnlyHint) no cuenta. Un deny gana siempre. */
+  /**
+   * Por defecto preguntan. Lo que declare el servidor (readOnlyHint) no cuenta. Un deny gana siempre. En `plan` no
+   * pasa ninguna, y ni una regla allow las abre: el lab no tiene la lista de tools de solo lectura de `harness`
+   * (`mcp.readOnly`, de los settings de usuario), así que se comporta como `harness` con esa lista vacía.
+   */
   private evaluateMcp(toolName: string, server: string): Decision {
     const hit = (r: Rule) => !r.specifier && matchMcpRule(r.tool, toolName, server);
     const all = (list: RuleList) => [...this.sessionRules[list], ...this.rules[list]];
     const deny = all("deny").find(hit);
     if (deny) return { kind: "deny", reason: `rule ${deny.raw}` };
+    if (this.cfg.mode === "plan") return { kind: "deny", reason: `plan mode: ${toolName} is not marked read-only` };
     const ask = all("ask").find(hit);
     if (ask) return { kind: "ask", reason: `rule ${ask.raw}` };
     const allow = all("allow").find(hit);

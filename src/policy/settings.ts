@@ -29,7 +29,7 @@ const SettingsSchema = z.object({
       allow: z.array(z.string()).default([]),
       ask: z.array(z.string()).default([]),
       deny: z.array(z.string()).default([]),
-      defaultMode: z.enum(["default", "acceptEdits", "bypass"]).optional(),
+      defaultMode: z.enum(["default", "acceptEdits", "plan", "bypass"]).optional(),
     })
     .default({ allow: [], ask: [], deny: [] }),
   sandbox: z
@@ -86,5 +86,5 @@ export function loadSettings(workspace: string): LoadedSettings {
   return out;
 }
 
-export const PERMISSION_MODES = new Set<string>(["default", "acceptEdits", "bypass"]);
+export const PERMISSION_MODES = new Set<string>(["default", "acceptEdits", "plan", "bypass"]);
 export const SANDBOX_CHOICES = new Set<string>(["auto", "bwrap", "seatbelt", "none"]);

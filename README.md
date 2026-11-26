@@ -2,7 +2,7 @@
 
 Un harness para agentes de código en terminal, construido parte a parte para entender cómo funcionan estos agentes por dentro. Acompaña a la serie «Asistente de código local» de [pablomeleroalonso.me](https://pablomeleroalonso.me).
 
-Esta versión (tag `parte-6`) ya **se puede ampliar sin tocar su código**: un bucle con streaming, un contrato de inferencia con un adaptador a `/v1/chat/completions`, gestión del contexto (limpiar y compactar contra la ventana, y detectar cuando el servidor recorta la conversación sin avisar), herramientas para leer, buscar y escribir (`Read`, `Glob`, `Grep`, `Write` y `Edit`), `Bash` con procesos en segundo plano (`BashOutput` y `KillShell`), un sistema de permisos con reglas de ruta y de comando, un sandbox del sistema operativo alrededor de cada comando y, nuevo en esta parte, tres formas de extenderlo: skills (procedimientos que el modelo carga cuando los necesita), hooks (comandos que el harness ejecuta antes o después de cada herramienta) y servidores MCP por stdio (herramientas de otro proceso). Todo proceso que lanza el harness, sea `Bash`, un hook o un servidor MCP, corre dentro del mismo sandbox. Cada parte de la serie añade commits y un tag nuevo.
+Esta versión (tag `parte-7`) ya **delega**: un bucle con streaming, un contrato de inferencia con un adaptador a `/v1/chat/completions`, gestión del contexto (limpiar y compactar contra la ventana, y detectar cuando el servidor recorta la conversación sin avisar), herramientas para leer, buscar y escribir (`Read`, `Glob`, `Grep`, `Write` y `Edit`), `Bash` con procesos en segundo plano (`BashOutput` y `KillShell`), un sistema de permisos con reglas de ruta y de comando, un sandbox del sistema operativo alrededor de cada comando, tres formas de extenderlo (skills, hooks y servidores MCP por stdio) y, nuevo en esta parte, subagentes: la tool `Agent` lanza otro bucle con su propia conversación, sus herramientas y un modo de permisos igual o más restrictivo, y al agente principal solo le vuelve su informe. También es nuevo el modo `plan`, que solo lee. Cada parte de la serie añade commits y un tag nuevo.
 
 | Tag | Qué añade |
 |---|---|
@@ -11,6 +11,7 @@ Esta versión (tag `parte-6`) ya **se puede ampliar sin tocar su código**: un b
 | `parte-4` | `Write`, `Edit` y los permisos de ruta. |
 | `parte-5` | `Bash`, las reglas de comando y el sandbox. |
 | `parte-6` | Skills, hooks y servidores MCP por stdio, dentro del sandbox. |
+| `parte-7` | Subagentes (`Agent`), en paralelo y en segundo plano, y el modo `plan`. |
 
 ## Prerrequisitos
 
@@ -28,7 +29,7 @@ ollama pull qwen2.5:7b
 ## Instalación
 
 ```bash
-git clone --branch parte-6 https://github.com/pmeleroa/lab-harness-local.git
+git clone --branch parte-7 https://github.com/pmeleroa/lab-harness-local.git
 cd lab-harness-local
 npm install
 npm test
@@ -66,10 +67,11 @@ npm run dev -- --workspace examples/demo "Usa Bash para ejecutar git status y di
 | `--base-url <url>` | Endpoint con `/v1`. Defecto: `$OPENAI_BASE_URL` o `http://localhost:11434/v1`. |
 | `--context-window <n>` | Ventana de contexto del servidor, en tokens. Defecto: 4096, con un aviso. |
 | `--max-turns <n>` | Turnos máximos del run. Defecto: 25. |
-| `--permission-mode <modo>` | `default`, `acceptEdits` o `bypass`. Defecto: `default`. |
+| `--permission-mode <modo>` | `default`, `acceptEdits`, `plan` o `bypass`. Defecto: `default`. |
 | `--allow <regla>`, `--deny <regla>` | Reglas extra, repetibles: `--deny "Edit(**/.env*)"`, `--allow "Bash(npm run *)"`. |
 | `--sandbox <modo>` | `auto` (bwrap en Linux, `sandbox-exec` en macOS), `bwrap`, `seatbelt` o `none`. Defecto: `auto`. |
 | `--no-network` | Sin red dentro del sandbox. |
+| `--no-agents` | Sin subagentes: quita la tool `Agent`. |
 
 ## Cómo termina un run
 
@@ -120,7 +122,9 @@ Cada llamada a una herramienta declara qué ruta real toca y si lee o escribe. E
 
 Las reglas se leen del bloque `permissions` de `<workspace>/.harness/settings.json` y de `--allow` y `--deny`. No hay ningún `deny` implícito: `examples/demo/.harness/settings.json` protege `.env*` y la propia configuración con reglas explícitas. Un repositorio no puede ponerse a sí mismo en `bypass`: ese modo solo se activa con `--permission-mode`.
 
-Lo que no hace: el prompt de aprobación muestra herramienta y ruta, no el diff; la protección de `.harness/settings.json` no viene integrada (es una regla); y nada impide que el modelo escriba algo dañino dentro del workspace en `acceptEdits`. Los permisos limitan dónde, no qué: lo que se escribió se revisa con `git diff`. Tampoco hay modo `plan`.
+Lo que no hace: el prompt de aprobación muestra herramienta y ruta, no el diff; la protección de `.harness/settings.json` no viene integrada (es una regla); y nada impide que el modelo escriba algo dañino dentro del workspace en `acceptEdits`. Los permisos limitan dónde, no qué: lo que se escribió se revisa con `git diff`.
+
+El modo `plan` solo lee: todo lo que preguntaría se deniega, así que leer dentro del workspace y los comandos de solo lectura pasan, y escribir, los comandos que pueden escribir y las tools MCP no, aunque una regla `allow` (de `settings.json` o aceptada con «siempre») los permita. Se activa con `--permission-mode plan` o con `defaultMode: "plan"` en `settings.json`: un repositorio puede restringirse, no ampliarse. Es el modo del subagente `explore`.
 
 ## Comandos y sandbox
 
@@ -212,21 +216,80 @@ git -C ~/tienda-demo log --oneline -2
 
 Con tres extensiones, el arranque ocupa unos 2.200 tokens; con una ventana de 4.096 se compacta en cada turno, por eso esta demo usa 8.192 (`OLLAMA_CONTEXT_LENGTH=8192 ollama serve`). Las salidas están en `examples/salidas/extensibilidad-*.txt`. Para dejarlo como estaba, borra `~/tienda-demo`.
 
+## Subagentes
+
+La tool `Agent` lanza un subagente: otro bucle, el mismo de siempre, con su propia conversación, sus herramientas, su `BashSession` y sus turnos. No ve la conversación del principal: el prompt que le escribe el principal es todo lo que sabe. Al principal solo le vuelve el informe final (recortado por el medio a 40.000 caracteres); lo que el subagente lea por el camino se queda en su ventana.
+
+| Tipo | Tools | Modo | Para qué |
+|---|---|---|---|
+| `explore` | `Read`, `Glob`, `Grep`, `Bash` | `plan` | Búsquedas y lecturas amplias. Hasta 40 turnos. |
+| `general` | las del principal, salvo `Agent` | el del principal | Una tarea autocontenida que llenaría la conversación de salida intermedia. |
+
+Se definen más tipos con un fichero en `<workspace>/.harness/agents/<nombre>.md`. Con el mismo nombre que un integrado, lo sustituye:
+
+```markdown
+---
+name: revisor
+description: Revisa el diff actual y señala bugs. Devuelve una lista priorizada.
+tools: Read, Grep, Bash
+model: inherit        # u otro modelo del mismo servidor; sin el campo, el del principal
+mode: plan            # solo restringe
+maxTurns: 20
+---
+Eres un revisor de código. ...
+```
+
+- **Tools**: un subconjunto de las del principal. Las desconocidas y `Agent` se descartan con aviso. Si la lista nombra tools MCP (`mcp__github`, `mcp__github__issue_*`), el subagente recibe solo esas; un tipo en `plan` no recibe ninguna.
+- **Permisos**: una definición solo puede restringir. El modo efectivo es el más restrictivo entre el del tipo y el del principal: con el principal en `plan`, todos los subagentes están en `plan`. Hereda las reglas, incluidos los `deny` y las reglas «siempre» aceptadas hasta ese momento, y lo que acepte con «siempre» se queda en él.
+- **Lanzar**: no pregunta, porque cada cosa que hace el subagente pasa por su propia política. `Agent` o `Agent(<tipo>)` en `deny` lo impiden, y `--no-agents` quita la tool.
+- **Un solo nivel**: un subagente nunca recibe `Agent`, ni `BashOutput` ni `KillShell`: sus comandos mueren con él. Sus prompts de permiso van de uno en uno con los del principal y dicen quién pide (`general·a1b2c3d4 pide Write ...`).
+- **Límites**: `maxTurns` del tipo (50 por defecto), acotado por el del principal (25 en el lab), y 200 llamadas. Si se queda sin turnos, su informe llega igualmente, marcado como posiblemente incompleto.
+- **Paralelo**: los tipos que acaban en `plan` cuentan como de solo lectura, así que varios en el mismo turno corren en paralelo, como mucho 4 a la vez; los que pueden escribir van en serie. Con un servidor local puede no ir más rápido: en Linux, Ollama atiende por defecto una petición a la vez por modelo ([`OLLAMA_NUM_PARALLEL`](https://docs.ollama.com/faq)) y el resto espera en su cola.
+- **En segundo plano**: con `run_in_background: true`, `Agent` vuelve al momento con un id (`agent·<id>`) y el informe llega como aviso en el siguiente run. Solo para tipos en `plan`: uno que escribe se rechaza. Un subagente idéntico que sigue en marcha no se vuelve a lanzar. Al acabar el run de la CLI se espera a los que queden y se hace otro run con sus informes, hasta 5 rondas; lo que siga pendiente al agotarlas, o tras 10 minutos sin aviso, se mata con aviso. Ctrl+C no los para.
+
+En la salida, cada subagente aparece como `> Agent explore·<id>`, con el prompt que recibió, sus tools sangradas (`  · explore·<id> > Read ...`) y una línea final con turnos, contexto máximo y tokens. Los de segundo plano no intercalan sus tools: solo `& agent·<id> en segundo plano` y su final. El resumen del run separa lo del principal y lo de los subagentes (`[subagentes] ...`): no ocupó la ventana del principal, pero se gastó igual.
+
+Ten cuidado con los repositorios ajenos: sus `.harness/agents` se cargan al arrancar. La cabecera los lista en `subagentes:` con «(de .harness/agents)».
+
+Diferencias con `harness`: el lab solo lee las definiciones del proyecto (sin capa de usuario ni `.claude/agents`), no guarda transcripts de los subagentes, no tiene `mcp.readOnly` (la lista de tools MCP permitidas en `plan`) ni el comando `/agents`.
+
+### El ejemplo: leer seis ficheros, con y sin subagente
+
+`examples/delegacion` es una tienda con planes de suscripción. La tarea es leer seis ficheros enteros y resumir qué hace cada uno: sin subagente, todo lo leído entra en la ventana del principal; con él, entra en la del subagente. La demo trabaja sobre una copia, y `examples/comprobar-delegacion.mjs` comprueba que la respuesta nombra los seis ficheros y que la traza muestra que se leyeron enteros y sin error, en las rutas del workspace. Con `-s`, `npm` no escribe en la salida su cabecera con el comando, que incluye los nombres de los ficheros:
+
+```bash
+cp -r examples/delegacion ~/tienda-planes
+FICHEROS="src/orders/refunds.ts, src/orders/checkout.ts, src/billing/invoices.ts, src/billing/taxes.ts, src/shipping/rates.ts y src/shipping/zones.ts"
+TAREA="Lee enteros con Read, sin limit ni offset, $FICHEROS, y resume en una línea qué hace cada uno."
+
+npm run -s dev -- --workspace ~/tienda-planes --context-window 8192 --no-agents "$TAREA" < /dev/null > sin.txt 2> sin-traza.txt
+node examples/comprobar-delegacion.mjs sin.txt sin-traza.txt
+
+npm run -s dev -- --workspace ~/tienda-planes --context-window 8192 \
+  "Usa un subagente explore, sin run_in_background, con este prompt: «$TAREA». Después responde con su resumen." < /dev/null > con.txt 2> con-traza.txt
+node examples/comprobar-delegacion.mjs con.txt con-traza.txt
+```
+
+Compara la última línea de cada traza: el contexto máximo del principal y, con subagente, la línea `[subagentes]`. Las salidas y las cifras de las ejecuciones están en `examples/salidas/`. Para dejarlo como estaba, borra `~/tienda-planes` y los cuatro ficheros.
+
 ## Estructura
 
 ```
 src/core/        loop, eventos y tareas en segundo plano
+src/agents/      tipos de subagente (integrados y .harness/agents) y sus ejecuciones
 src/skills/      carga de skills y catálogo
 src/hooks/       hooks PreToolUse y PostToolUse
 src/mcp/         configuración (.mcp.json) y cliente MCP por stdio
 src/context/     tope, limpieza y compaction, detección de recortes, AGENTS.md
 src/providers/   contrato canónico y adaptador a chat completions
-src/tools/       contrato de herramientas, registro, Read, Glob, Grep, Write, Edit, Bash, Skill y tools MCP, estado de lectura
+src/tools/       contrato de herramientas, registro, Read, Glob, Grep, Write, Edit, Bash, Skill, Agent y tools MCP, estado de lectura
 src/policy/      motor de permisos, reglas de ruta y de comando, parser de bash, sandbox, approver y settings
 src/cli.ts       salida por terminal
 examples/demo/   repositorio pequeño para las preguntas de ejemplo
+examples/delegacion/   tienda con planes de suscripción para la demo de subagentes
+examples/comprobar-delegacion.mjs  comprobación de esa demo (respuesta y traza)
 examples/desbordar.ts  conversación fija que desborda una ventana de 4096
-examples/salidas/      salidas reales de ejecuciones: escritura, seguridad, sandbox y extensibilidad
+examples/salidas/      salidas reales de ejecuciones: escritura, seguridad, sandbox, extensibilidad y delegación
 test/            proveedor simulado, servidor MCP de prueba y tests
 ```
 

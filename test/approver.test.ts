@@ -134,6 +134,10 @@ describe("settings", () => {
 
   it("una regla mal escrita o un fichero inválido fallan al arrancar", () => {
     expect(() => loadSettings(withSettings({ permissions: { deny: ["not a rule("] } }))).toThrow(/Invalid permission rule/);
-    expect(() => loadSettings(withSettings({ permissions: { defaultMode: "plan" } }))).toThrow(/Invalid settings/);
+    expect(() => loadSettings(withSettings({ permissions: { defaultMode: "yolo" } }))).toThrow(/Invalid settings/);
+  });
+
+  it("defaultMode plan se acepta: un repositorio puede restringirse, no escalarse", () => {
+    expect(loadSettings(withSettings({ permissions: { defaultMode: "plan" } })).mode).toBe("plan");
   });
 });

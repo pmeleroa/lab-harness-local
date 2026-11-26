@@ -1,0 +1,39 @@
+$ cp -r examples/delegacion ~/tienda-planes
+$ npm run -s dev -- --workspace ~/tienda-planes --context-window 8192 "Usa un subagente explore, sin run_in_background, con este prompt: «Lee enteros con Read, sin limit ni offset, src/orders/refunds.ts, src/orders/checkout.ts, src/billing/invoices.ts, src/billing/taxes.ts, src/shipping/rates.ts y src/shipping/zones.ts, y resume en una línea qué hace cada uno.». Después responde con su resumen." < /dev/null
+
+=== stderr
+workspace: ~/tienda-planes
+modelo: qwen2.5:7b
+modo: default (sin .harness/settings.json: ningún deny)
+sandbox: bwrap
+subagentes: explore, general
+
+ctx 2,4k/8,2k (30%)
+> Agent explore·dd3c076b: Resumen de archivos
+  prompt: Lee enteros con Read, sin limit ni offset, src/orders/refunds.ts, src/orders/checkout.ts, src/billing/invoices.ts, src/billing/taxes.ts, src/shipping/rates.ts y src/shipping/zones.ts, y resume en una línea qué hace cada uno.
+  · explore·dd3c076b ctx 1,7k/8,2k (21%)
+  · explore·dd3c076b > Read {"file_path":"src/orders/refunds.ts"}
+  · explore·dd3c076b > Read {"file_path":"src/orders/checkout.ts"}
+  · explore·dd3c076b > Read {"file_path":"src/billing/invoices.ts"}
+  · explore·dd3c076b > Read {"file_path":"src/billing/taxes.ts"}
+  · explore·dd3c076b > Read {"file_path":"src/shipping/rates.ts"}
+  · explore·dd3c076b > Read {"file_path":"src/shipping/zones.ts"}
+  · explore·dd3c076b ctx 6,1k/8,2k (74%)
+  < explore·dd3c076b informe listo: 2 turnos, 6 llamadas, contexto máximo 6,1k, 7,2k tokens de entrada, 589 de salida, 25 s
+  al principal vuelve un informe de ~313 tokens
+ctx 3,0k/8,2k (36%)
+
+[end_turn] 2 turnos, 1 llamadas, 5077 tokens de entrada (4071 de caché), 305 de salida, contexto máximo 2962
+[subagentes] 1 (explore·dd3c076b), 7214 tokens de entrada (2963 de caché), 589 de salida, contexto máximo 6061
+=== stdout
+Aquí tienes un resumen de cada uno de los archivos leídos:
+
+- **src/orders/refunds.ts**: Define la lógica para solicitar devoluciones en pedidos ya entregados.
+- **src/orders/checkout.ts**: Implementa la lógica para cerrar el pedido, validando el carrito de compras y proporcionando un resumen del pedido.
+- **src/billing/invoices.ts**: Contiene la lógica para emitir facturas mensuales o anuales y decidir si una factura debe ser suspendida.
+- **src/billing/taxes.ts**: Proporciona funciones para calcular el IVA y el precio con IVA.
+- **src/shipping/rates.ts**: Define las tarifas y plazos de envío según el nivel de envío del plan de suscripción.
+- **src/shipping/zones.ts**: Determina las zonas de envío a partir del código postal y proporciona información sobre zonas de envío.
+
+$ node examples/comprobar-delegacion.mjs respuesta.txt traza.txt
+ok: nombra los 6 ficheros y los leyó enteros

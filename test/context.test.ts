@@ -22,9 +22,11 @@ function workspace(files: Record<string, string> = {}): string {
 /** Ventana de 20k con 4k de respuesta: 16k útiles (clearing a 9,6k, compaction a 13,6k). */
 async function setup(script: Script, o: { files?: Record<string, string>; config?: Record<string, unknown>; truncate?: { window: number; mode?: "collapse" | "plateau" } } = {}) {
   const provider = new FakeProvider(script, o.truncate ? { truncate: o.truncate } : {});
+  // Sin la tool Agent: estos tests miden la gestión del contexto con tamaños fijos, y su descripción los movería.
   const h = await createHarness({
     workspace: workspace(o.files),
     provider,
+    agents: false,
     config: { contextWindow: 20_000, maxTokens: 4_000, ...o.config },
   });
   const events: AgentEvent[] = [];
