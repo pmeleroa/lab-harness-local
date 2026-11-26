@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { type AgentDefinition, loadAgents, mcpToolAllowed, toolsFor } from "./agents/loader.js";
 import { Semaphore, type SubagentRun } from "./agents/runs.js";
@@ -27,6 +27,19 @@ import { loadMcpConfig } from "./mcp/config.js";
 import { McpManager } from "./mcp/manager.js";
 import { createMcpTools, mcpServerOf } from "./tools/mcp.js";
 import type { HookConfig } from "./policy/settings.js";
+import {
+  JsonlSessionStore,
+  MemorySessionStore,
+  type SessionStore,
+  type SessionSummary,
+  forkSession,
+  listSessions,
+  repairTranscript,
+  resolveSession,
+  sessionsDirOf,
+  sessionsRoot,
+  subagentsDir,
+} from "./session/jsonl-store.js";
 
 export const DEFAULT_MODEL = "qwen2.5:7b";
 export const DEFAULT_BASE_URL = "http://localhost:11434/v1";
@@ -45,7 +58,10 @@ export interface HarnessOptions {
   /** `default` pregunta antes de escribir; `acceptEdits` escribe dentro del workspace; `bypass` no pregunta. */
   permissionMode?: PermissionMode;
   // Reglas `allow`, `ask` y `deny`, por ejemplo `Edit(src/**)` o `Bash(npm run *)`. `deny` gana siempre.
+  /** Las de `.harness/settings.json`. */
   rules?: Partial<RuleSet>;
+  /** Las de `--allow` y `--deny`: el registro `approval` las distingue de las de settings. */
+  flagRules?: Partial<RuleSet>;
   /** Sandbox de los comandos: `auto` (bwrap en Linux, sandbox-exec en macOS), uno concreto o `none`. */
   sandbox?: SandboxChoice;
   /** Red dentro del sandbox: `host` (la del usuario) o `none` (sin red). */
@@ -65,6 +81,14 @@ export interface HarnessOptions {
   /** Sustituye al modelo real: los tests inyectan un proveedor simulado. */
   provider?: Provider;
   config?: Partial<AgentConfig>;
+  /** Transcript. Sin él, uno nuevo en `~/.harness/sessions/<clave del workspace>/` (o el que se retoma). */
+  session?: SessionStore;
+  /** Id (o prefijo) de una sesión de este workspace a continuar (`--resume`). Se ignora si se pasa `session`. */
+  resume?: string;
+  /** Continúa la sesión más reciente de este workspace (`--continue`). */
+  continueLatest?: boolean;
+  /** Con `resume` o `continueLatest`: continúa en una copia de la sesión (fork) en lugar de en su fichero. */
+  forkSession?: boolean;
 }
 
 export interface Harness {
@@ -83,6 +107,12 @@ export interface Harness {
   agents: AgentDefinition[];
   /** Subagentes que han terminado en esta sesión, en orden: lo que consumieron aparte y lo que devolvieron. */
   subagentRuns: SubagentRun[];
+  /** Transcript de esta invocación. */
+  session: SessionStore;
+  /** La sesión continuada al arrancar (`--resume` / `--continue`), si la hay. */
+  resumed: SessionSummary | null;
+  /** Directorio de los transcripts de este workspace. */
+  sessionsDir: string;
   workspace: string;
   model: string;
   /** Avisos de arranque (por ejemplo, que se asume la ventana por defecto o que no hay sandbox). */
@@ -125,6 +155,10 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
         "un servidor con menos ventana recorta la conversación sin avisar.",
     );
   }
+
+  // La raíz de las sesiones existe antes que cualquier sandbox: bwrap solo tapa las rutas ocultas que ya existen, y
+  // Bash puede arrancar antes del primer mensaje. El fichero de la sesión, en cambio, no se crea hasta entonces.
+  mkdirSync(sessionsRoot(), { recursive: true });
 
   // El sandbox se elige y se comprueba al arrancar: si no funciona, se avisa y los comandos corren sin él.
   const { sandbox, warning } = detectSandbox(o.sandbox ?? "auto");
@@ -176,6 +210,8 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
       workspace,
       mode: o.permissionMode ?? "default",
       rules: { ...emptyRules(), ...o.rules },
+      ...(o.flagRules ? { flagRules: o.flagRules } : {}),
+      sessionsRoot: realpathSync(sessionsRoot()),
     },
     await BashParser.create(),
   );
@@ -199,6 +235,44 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   const approver = o.approver ?? denyAllApprover;
   const approvalLock = new ApprovalLock();
   const config = { ...defaultAgentConfig(model), ...o.config };
+  const contextWindow = config.contextWindow ?? provider.capabilities.contextWindow;
+
+  // Sesión: una nueva, la más reciente (--continue) o una concreta (--resume), y con --fork-session, una copia.
+  const sessionsDir = sessionsDirOf(workspace);
+  let resumed: SessionSummary | null = null;
+  if (!o.session && o.resume) resumed = resolveSession(sessionsDir, o.resume);
+  else if (!o.session && o.continueLatest) {
+    resumed = listSessions(sessionsDir)[0] ?? null;
+    if (!resumed) warnings.push("No previous session in this workspace: starting a new one.");
+  }
+  if (resumed && o.forkSession) resumed = forkSession(sessionsDir, resumed.file, { workspace, model, contextWindow });
+  else if (o.forkSession && !o.session && !o.resume && !o.continueLatest) warnings.push("--fork-session needs --continue or --resume: ignored.");
+  const session = o.session ?? new JsonlSessionStore(sessionsDir, resumed?.id);
+  // Un `meta` en cada arranque, con el modelo y la ventana de ahora: retomar no los hereda de la sesión. Un fork ya
+  // lleva el suyo, con forkedFrom. Lo de MCP va para que el replay pueda reconstruir las tools sin conectar.
+  if (!(resumed && o.forkSession)) {
+    const servers = mcp.servers();
+    const mcpTools = registry.specs().filter((t) => t.name.startsWith("mcp__"));
+    session.append({
+      type: "meta",
+      ts: new Date().toISOString(),
+      sessionId: session.id,
+      workspace,
+      model,
+      contextWindow,
+      ...(servers.length || mcpTools.length
+        ? { mcp: { servers: servers.map((x) => ({ name: x.name, status: x.status, transport: x.config.type, tools: x.tools.length })), tools: mcpTools } }
+        : {}),
+    });
+  }
+  // Retomar una sesión que usó tools MCP que ya no están: el modelo las verá en la conversación pero no podrá llamarlas.
+  if (resumed) {
+    const missing = new Set<string>();
+    for (const r of JsonlSessionStore.readRecords(resumed.file))
+      if (r.type === "message")
+        for (const b of r.message.content) if (b.type === "tool_use" && b.name.startsWith("mcp__") && !registry.get(b.name)) missing.add(b.name);
+    if (missing.size) warnings.push(`This session used MCP tools that are not available now: ${[...missing].join(", ")}.`);
+  }
 
   // Subagentes: tipos integrados + .harness/agents. La tool Agent solo la tiene el agente principal.
   const agentsLoaded = o.agents === false ? { agents: [], warnings: [] } : loadAgents(workspace, baseTools);
@@ -214,10 +288,13 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   const spawn = async (req: SubagentRequest): Promise<RunResult> => {
     const { def } = req;
     const release = await slots.acquire();
-    const ref: AgentRef = req.background
-      ? { id: req.background.id, type: def.name, background: true }
-      : { id: randomUUID().slice(0, 8), type: def.name };
+    const uuid = randomUUID();
+    const ref: AgentRef = req.background ? { id: req.background.id, type: def.name, background: true } : { id: uuid.slice(0, 8), type: def.name };
     const childModel = def.model ?? model;
+    // Cada subagente, su transcript: en `<sesión>/agents/`, con la sesión que lo lanzó. Sus decisiones van ahí.
+    const store: SessionStore =
+      session instanceof JsonlSessionStore ? new JsonlSessionStore(subagentsDir(sessionsDir, session.id), uuid) : new MemorySessionStore();
+    store.append({ type: "meta", ts: new Date().toISOString(), sessionId: uuid, workspace, model: childModel, parentSessionId: session.id, agentType: def.name });
     const childBash = new BashSession({ workspace, sandbox, network, hiddenPaths: defaultHiddenPaths() });
     const toolNames = toolsFor(def, baseTools);
     const childPolicy = policy.derive(def.mode);
@@ -237,6 +314,7 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
         approvalLock,
         ref,
         hooks,
+        session: store,
       },
       {
         ...config,
@@ -269,6 +347,18 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
       peakContext: r.peakContext,
       reportTokens: Math.ceil(r.text.length / 4),
     });
+    const file = store instanceof JsonlSessionStore ? store.file : undefined;
+    session.append({
+      type: "subagent",
+      ts: new Date().toISOString(),
+      id: uuid,
+      agentType: def.name,
+      description: req.description,
+      reason: r.reason,
+      turns: r.turns,
+      usage: r.usage,
+      ...(file ? { file } : {}),
+    });
     bus.emit({
       t: "subagent_end",
       id: ref.id,
@@ -300,9 +390,39 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
       approvalLock,
       notifications: { drain: () => notificationBlocks(tasks.drain()) },
       hooks,
+      session,
     },
     config,
   );
+
+  // Retomar: solo la conversación, desde el último `compact`, y con los tool_use cortados reparados. El modo, los
+  // «siempre», lo leído y el modelo y la ventana no vienen de la sesión: vienen de esta invocación.
+  if (resumed) {
+    const read = JsonlSessionStore.readMessages(resumed.file);
+    const repaired = repairTranscript(read);
+    // La reparación se escribe: si solo estuviera en memoria, la siguiente retomada (o un fork) leería otra vez el
+    // tool_use sin su tool_result, ya en mitad de la conversación, donde repairTranscript no mira.
+    if (repaired.length > read.length) session.append({ type: "message", ts: new Date().toISOString(), message: repaired.at(-1)! });
+    agent.restore(repaired, session);
+  }
+
+  // Inicio y fin de cada tarea en segundo plano, en el transcript.
+  bus.on((e) => {
+    if (e.t === "task_start")
+      session.append({ type: "task", ts: new Date().toISOString(), id: e.id, kind: e.kind, description: e.description, status: "running" });
+    else if (e.t === "task_end")
+      session.append({
+        type: "task",
+        ts: new Date().toISOString(),
+        id: e.id,
+        kind: e.kind,
+        description: tasks.get(e.id)?.description ?? "",
+        status: e.status,
+        summary: e.summary,
+        ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}),
+      });
+  });
+
   return {
     agent,
     bus,
@@ -314,6 +434,9 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
     mcp,
     agents,
     subagentRuns,
+    session,
+    resumed,
+    sessionsDir,
     workspace,
     model,
     warnings,
@@ -389,4 +512,6 @@ export type { Tool, ToolCtx, ToolOutput } from "./tools/types.js";
 export type { AgentDefinition } from "./agents/loader.js";
 export type { SubagentRun } from "./agents/runs.js";
 export type { TaskInfo, TaskNotification } from "./core/background.js";
+export type { SessionRecord, SessionStore, SessionSummary } from "./session/jsonl-store.js";
+export { JsonlSessionStore, MemorySessionStore, sessionsDirOf, sessionsRoot, workspaceKey } from "./session/jsonl-store.js";
 export { defineTool } from "./tools/types.js";

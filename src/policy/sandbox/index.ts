@@ -103,10 +103,13 @@ export function detectSandbox(choice: SandboxChoice = "auto"): DetectResult {
   return { sandbox: noSandbox, warning: `No sandbox available on ${process.platform}. Run inside a container.` };
 }
 
-/** Credenciales habituales que un comando nunca necesita leer. */
+/**
+ * Credenciales habituales que un comando nunca necesita leer, y los transcripts de las sesiones: guardan todo lo que
+ * leyó el agente, también fuera del workspace, así que Bash y los servidores MCP no los ven.
+ */
 export function defaultHiddenPaths(): string[] {
   const h = os.homedir();
-  return [".ssh", ".aws", ".gnupg", ".config/gcloud", ".azure", ".kube", ".docker/config.json", ".npmrc", ".netrc"].map(
+  return [".ssh", ".aws", ".gnupg", ".config/gcloud", ".azure", ".kube", ".docker/config.json", ".npmrc", ".netrc", ".harness/sessions"].map(
     (p) => path.join(h, p),
   );
 }
