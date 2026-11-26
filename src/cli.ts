@@ -10,6 +10,7 @@ import { PERMISSION_MODES, SANDBOX_CHOICES, loadSettings } from "./policy/settin
 import type { SandboxChoice } from "./policy/sandbox/index.js";
 import type { AgentEvent } from "./core/events.js";
 import { type Usage, addUsage, emptyUsage } from "./providers/canonical.js";
+import { formatResumed } from "./session/jsonl-store.js";
 import { VERSION } from "./version.js";
 
 const HELP = `lab-harness-local ${VERSION}: un harness para agentes de código en terminal
@@ -31,7 +32,12 @@ Uso: npm run dev -- [opciones] "<pregunta>"
                           none (los comandos corren con todos tus permisos)
       --no-network        sin red dentro del sandbox
       --no-agents         sin subagentes (quita la tool Agent)
+  -c, --continue          continúa la sesión más reciente de este workspace
+  -r, --resume <id>       continúa la sesión indicada (id o prefijo)
+      --fork-session      con -c / -r: continúa en una copia; la sesión original no cambia
   -h, --help
+
+Las sesiones se guardan en ~/.harness/sessions/<workspace>-<hash>/<id>.jsonl.
 `;
 
 const { values, positionals } = parseArgs({
@@ -48,6 +54,9 @@ const { values, positionals } = parseArgs({
     sandbox: { type: "string" },
     "no-network": { type: "boolean" },
     "no-agents": { type: "boolean" },
+    continue: { type: "boolean", short: "c" },
+    resume: { type: "string", short: "r" },
+    "fork-session": { type: "boolean" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -56,6 +65,11 @@ const prompt = positionals.join(" ").trim();
 if (values.help || !prompt) {
   process.stdout.write(HELP);
   process.exit(values.help ? 0 : 2);
+}
+
+if (values.continue && values.resume) {
+  process.stderr.write("--continue and --resume are mutually exclusive\n");
+  process.exit(2);
 }
 
 const maxTurns = values["max-turns"] ? Number(values["max-turns"]) : undefined;
@@ -95,16 +109,17 @@ const approver: Approver = rl ? ttyApprover(rl) : denyAllApprover;
 const sandboxChoice = (requestedSandbox as SandboxChoice | undefined) ?? settings.sandbox.mode;
 const network = values["no-network"] ? "none" : settings.sandbox.network;
 
-const { agent, bus, workspace, model, policy, bash, skills, mcp, agents, subagentRuns, warnings, endRun, followUp, dispose } = await createHarness({
+const { agent, bus, workspace, model, policy, bash, skills, mcp, agents, subagentRuns, session, resumed, warnings, endRun, followUp, dispose } = await createHarness({
   ...(permissionMode ? { permissionMode } : {}),
   ...(values["no-agents"] ? { agents: false } : {}),
   ...(sandboxChoice ? { sandbox: sandboxChoice } : {}),
   ...(network ? { network } : {}),
-  rules: {
-    allow: [...settings.rules.allow, ...values.allow],
-    ask: settings.rules.ask,
-    deny: [...settings.rules.deny, ...values.deny],
-  },
+  // Las de settings y las de los flags van por separado: el registro `approval` dice de dónde vino la regla.
+  rules: settings.rules,
+  flagRules: { allow: values.allow, deny: values.deny },
+  ...(values.resume ? { resume: values.resume } : {}),
+  ...(values.continue ? { continueLatest: true } : {}),
+  ...(values["fork-session"] ? { forkSession: true } : {}),
   hooks: settings.hooks,
   approver,
   ...(values.workspace ? { workspace: values.workspace } : {}),
@@ -248,7 +263,7 @@ bus.on((e: AgentEvent) => {
   if (other !== null) writeLine(other);
 });
 
-process.stderr.write(`workspace: ${workspace}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\nsandbox: ${bash.sandboxName}${network !== "none" ? "" : bash.sandboxName === "none" ? " (--no-network no tiene efecto sin sandbox)" : ", sin red"}\n`);
+process.stderr.write(`workspace: ${workspace}\nsesión: ${session.id}\nmodelo: ${model}\nmodo: ${policy.mode}${settings.file ? "" : " (sin .harness/settings.json: ningún deny)"}\nsandbox: ${bash.sandboxName}${network !== "none" ? "" : bash.sandboxName === "none" ? " (--no-network no tiene efecto sin sandbox)" : ", sin red"}\n`);
 // Lo que amplía al harness sin tocar su código: qué skills ve el modelo y qué hooks del repositorio se ejecutan.
 if (skills.length) process.stderr.write(`skills: ${skills.map((s) => (s.modelInvocable ? s.name : `${s.name} (no invocable)`)).join(", ")}\n`);
 // Los tipos de .harness/agents son contenido del repositorio: instrucciones y tools que el modelo puede lanzar.
@@ -266,6 +281,8 @@ for (const s of mcp.servers()) {
 }
 for (const w of settings.warnings) process.stderr.write(`! ${w}\n`);
 for (const w of warnings) process.stderr.write(`! ${w}\n`);
+// Al retomar, dónde se quedó: el último prompt y la última respuesta.
+if (resumed) process.stderr.write(formatResumed(resumed, agent.messages, process.stderr.columns || 100));
 process.stderr.write("\n");
 const ctl = new AbortController();
 process.once("SIGINT", () => ctl.abort());

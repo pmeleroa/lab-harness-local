@@ -3,6 +3,7 @@ import type { ToolUseBlock } from "../providers/canonical.js";
 import type { PermissionTarget } from "../tools/types.js";
 import { isInside, resolveReal } from "../tools/types.js";
 import type { BashParser, SimpleCommand, Token } from "./bash-parser.js";
+import type { RuleSource } from "../session/jsonl-store.js";
 import { type Rule, matchCommand, matchMcpRule, matchPath, parseRule } from "./rules.js";
 
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypass";
@@ -16,10 +17,36 @@ export function narrowMode(current: PermissionMode, requested?: PermissionMode):
   return MODE_ORDER.indexOf(requested) < MODE_ORDER.indexOf(current) ? requested : current;
 }
 
-export type Decision =
-  | { kind: "allow"; reason: string }
-  | { kind: "deny"; reason: string }
-  | { kind: "ask"; reason: string };
+/**
+ * Quién decide, sin tener que leer `reason`: una regla (con la regla y de dónde viene), el modo de permisos o la
+ * política del motor (el perímetro del workspace, lo que solo lee, el target `agent`, la tarea propia).
+ */
+export type DecisionOrigin = "rule" | "mode" | "policy";
+
+export interface Decision {
+  kind: "allow" | "deny" | "ask";
+  reason: string;
+  origin: DecisionOrigin;
+  rule?: string;
+  ruleSource?: RuleSource;
+}
+
+/** Una regla y de dónde viene: `.harness/settings.json`, `--allow`/`--deny`, un «siempre» o el propio harness. */
+type SourcedRule = Rule & { source: RuleSource };
+
+const policy = (kind: Decision["kind"], reason: string): Decision => ({ kind, reason, origin: "policy" });
+const byMode = (kind: Decision["kind"], reason: string): Decision => ({ kind, reason, origin: "mode" });
+const byRule = (kind: Decision["kind"], r: SourcedRule, reason = `rule ${r.raw}`): Decision => ({
+  kind,
+  reason,
+  origin: "rule",
+  rule: r.raw,
+  ruleSource: r.source,
+});
+
+/** Lo que el agente nunca escribe, en ningún modo: sus propios transcripts. */
+export const SESSIONS_RULE = "Edit(~/.harness/sessions/**)";
+export const SESSIONS_DENY_REASON = "session transcripts are read-only for the agent";
 
 export interface RuleSet {
   allow: string[];
@@ -33,7 +60,12 @@ export interface PolicyConfig {
   /** Ruta real del workspace: el motor compara rutas ya resueltas con `realpath`. */
   workspace: string;
   mode: PermissionMode;
+  /** Reglas de `.harness/settings.json`. */
   rules: RuleSet;
+  /** Reglas de `--allow` y `--deny`: van detrás de las de settings. */
+  flagRules?: Partial<RuleSet>;
+  /** Ruta real de `~/.harness/sessions`: ninguna escritura del agente pasa ahí, ni en `bypass`. */
+  sessionsRoot?: string;
 }
 
 export const emptyRules = (): RuleSet => ({ allow: [], ask: [], deny: [] });
@@ -68,18 +100,18 @@ const INLINE_CODE_FLAGS = new Set(["-c", "-e", "--eval", "-p", "--print", "-r", 
 const FIND_EXEC_FLAGS = new Set(["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"]);
 
 export class PolicyEngine {
-  private rules: Record<RuleList, Rule[]>;
-  private sessionRules: Record<RuleList, Rule[]> = { allow: [], ask: [], deny: [] };
+  private rules: Record<RuleList, SourcedRule[]>;
+  private sessionRules: Record<RuleList, SourcedRule[]> = { allow: [], ask: [], deny: [] };
 
   constructor(
     private cfg: PolicyConfig,
     private bash: BashParser,
   ) {
-    this.rules = {
-      allow: cfg.rules.allow.map(parseRule),
-      ask: cfg.rules.ask.map(parseRule),
-      deny: cfg.rules.deny.map(parseRule),
-    };
+    const load = (list: RuleList): SourcedRule[] => [
+      ...cfg.rules[list].map((raw) => ({ ...parseRule(raw), source: "settings" as const })),
+      ...(cfg.flagRules?.[list] ?? []).map((raw) => ({ ...parseRule(raw), source: "flag" as const })),
+    ];
+    this.rules = { allow: load("allow"), ask: load("ask"), deny: load("deny") };
   }
 
   get mode(): PermissionMode {
@@ -99,7 +131,7 @@ export class PolicyEngine {
 
   /** Reglas añadidas en caliente ("siempre" en el prompt). Viven solo en esta sesión. */
   addSessionRule(list: RuleList, raw: string): void {
-    this.sessionRules[list].push(parseRule(raw));
+    this.sessionRules[list].push({ ...parseRule(raw), source: "session" });
   }
 
   evaluate(call: ToolUseBlock, target: PermissionTarget): Decision {
@@ -108,11 +140,11 @@ export class PolicyEngine {
       // En `plan` solo se lee: lo que puede escribir se deniega aunque una regla allow lo permita, y lo que
       // requiere confirmación, también. Las reglas no amplían `plan`, y paralelo y segundo plano cuentan con ello.
       const write = this.planWrite(target);
-      if (write) return { kind: "deny", reason: `plan mode: ${write}` };
-      if (d.kind === "ask") return { kind: "deny", reason: `plan mode: ${d.reason}` };
+      if (write) return byMode("deny", `plan mode: ${write}`);
+      if (d.kind === "ask") return byMode("deny", `plan mode: ${d.reason}`);
     }
     // `bypass` convierte cualquier `ask` en `allow`; un `deny` no se toca.
-    if (this.cfg.mode === "bypass" && d.kind === "ask") return { kind: "allow", reason: `bypass mode (${d.reason})` };
+    if (this.cfg.mode === "bypass" && d.kind === "ask") return byMode("allow", `bypass mode (${d.reason})`);
     return d;
   }
 
@@ -179,13 +211,11 @@ export class PolicyEngine {
         // Lanzar no pregunta: cada cosa que haga el subagente pasa por su propia política. `Agent` o
         // `Agent(<tipo>)` en una regla sí cuentan.
         return (
-          this.byRules((r) => r.tool === call.name && (!r.specifier || r.specifier === target.type)) ?? {
-            kind: "allow",
-            reason: `subagent ${target.type}: its tools go through its own policy`,
-          }
+          this.byRules((r) => r.tool === call.name && (!r.specifier || r.specifier === target.type)) ??
+          policy("allow", `subagent ${target.type}: its tools go through its own policy`)
         );
       case "task":
-        return this.byRules((r) => r.tool === call.name && !r.specifier) ?? { kind: "allow", reason: "own background task" };
+        return this.byRules((r) => r.tool === call.name && !r.specifier) ?? policy("allow", "own background task");
       case "mcp":
         return this.evaluateMcp(call.name, target.server);
     }
@@ -200,43 +230,52 @@ export class PolicyEngine {
     const hit = (r: Rule) => !r.specifier && matchMcpRule(r.tool, toolName, server);
     const all = (list: RuleList) => [...this.sessionRules[list], ...this.rules[list]];
     const deny = all("deny").find(hit);
-    if (deny) return { kind: "deny", reason: `rule ${deny.raw}` };
-    if (this.cfg.mode === "plan") return { kind: "deny", reason: `plan mode: ${toolName} is not marked read-only` };
+    if (deny) return byRule("deny", deny);
+    if (this.cfg.mode === "plan") return byMode("deny", `plan mode: ${toolName} is not marked read-only`);
     const ask = all("ask").find(hit);
-    if (ask) return { kind: "ask", reason: `rule ${ask.raw}` };
+    if (ask) return byRule("ask", ask);
     const allow = all("allow").find(hit);
-    if (allow) return { kind: "allow", reason: `rule ${allow.raw}` };
-    return { kind: "ask", reason: `${toolName} (MCP server "${server}") requires approval` };
+    if (allow) return byRule("allow", allow);
+    return policy("ask", `${toolName} (MCP server "${server}") requires approval`);
   }
 
   private evaluatePath(toolName: string, absPath: string, access: "read" | "write"): Decision {
+    // Los transcripts: antes que cualquier regla allow, y un deny que ni `bypass` toca. Leerlos no se prohíbe: están
+    // fuera del workspace, así que preguntan (y en `plan`, se deniegan).
+    const root = this.cfg.sessionsRoot;
+    if (access === "write" && root && isInside(root, absPath))
+      return byRule("deny", { raw: SESSIONS_RULE, tool: "Edit", source: "builtin" }, SESSIONS_DENY_REASON);
     // `Edit(...)` cubre también `Write`; `Read(...)` cubre Glob y Grep.
     const ruleTools = access === "write" ? new Set([toolName, "Edit"]) : new Set([toolName, "Read"]);
     const ruled = this.byRules((r) => ruleTools.has(r.tool) && (!r.specifier || matchPath(r.specifier, absPath, this.cfg.workspace)));
     if (ruled) return ruled;
 
     const inside = isInside(this.cfg.workspace, absPath);
-    if (access === "read")
-      return inside ? { kind: "allow", reason: "read inside workspace" } : { kind: "ask", reason: `read outside workspace: ${absPath}` };
-    if (!inside) return { kind: "ask", reason: `write outside workspace: ${absPath}` };
-    if (this.cfg.mode === "acceptEdits" || this.cfg.mode === "bypass")
-      return { kind: "allow", reason: `${this.cfg.mode}: write inside workspace` };
-    return { kind: "ask", reason: `write ${absPath}` };
+    if (access === "read") return inside ? policy("allow", "read inside workspace") : policy("ask", `read outside workspace: ${absPath}`);
+    if (!inside) return policy("ask", `write outside workspace: ${absPath}`);
+    if (this.cfg.mode === "acceptEdits" || this.cfg.mode === "bypass") return byMode("allow", `${this.cfg.mode}: write inside workspace`);
+    return policy("ask", `write ${absPath}`);
   }
 
   private evaluateCommand(toolName: string, command: string, cwd: string): Decision {
     const parsed = this.bash.parse(command);
     let ask: string | null = parsed.problems[0] ?? null;
+    /** La regla `ask` que hizo preguntar, si fue una. */
+    let askRule: SourcedRule | null = null;
+    /** La primera regla `allow` que dejó pasar un subcomando: si todo pasa, decidió una regla y no la política. */
+    let allowedBy: SourcedRule | null = null;
 
     // 1. Deny gana siempre, sobre cualquier subcomando, incluso en bypass.
     for (const c of parsed.commands) {
       const d = this.findRule("deny", toolName, c);
-      if (d) return { kind: "deny", reason: `denied by rule ${d.raw}: ${c.text}` };
+      if (d) return byRule("deny", d, `denied by rule ${d.raw}: ${c.text}`);
     }
 
     // 2. Cada subcomando necesita su propio permiso.
     for (const c of parsed.commands) {
-      if (this.findRule("ask", toolName, c)) {
+      const askHit = this.findRule("ask", toolName, c);
+      if (askHit) {
+        if (ask === null) askRule = askHit;
         ask ??= `matches ask rule: ${c.text}`;
         continue;
       }
@@ -245,7 +284,11 @@ export class PolicyEngine {
         ask ??= `${opaque}: ${c.text}`;
         continue;
       }
-      if (this.findRule("allow", toolName, c)) continue;
+      const allowHit = this.findRule("allow", toolName, c);
+      if (allowHit) {
+        allowedBy ??= allowHit;
+        continue;
+      }
       if (isReadOnly(c.argv)) continue;
       ask ??= `run: ${c.text}`;
     }
@@ -263,7 +306,7 @@ export class PolicyEngine {
       if (relative && dirs.unknown) {
         // No se puede saber qué fichero es, así que ningún deny se puede comprobar: en bypass no basta con preguntar.
         const reason = `redirect ${w.value} after a directory change to an unknown path`;
-        if (this.cfg.mode === "bypass") return { kind: "deny", reason };
+        if (this.cfg.mode === "bypass") return byMode("deny", reason);
         ask ??= reason;
       }
       for (const dir of relative ? dirs.known : [cwd]) {
@@ -274,11 +317,12 @@ export class PolicyEngine {
       if (relative && dirs.known.length > 1) ask ??= `redirect ${w.value} after a directory change`;
     }
 
-    if (parsed.commands.length === 0 && !ask) return { kind: "allow", reason: "no commands" };
-    return ask ? { kind: "ask", reason: ask } : { kind: "allow", reason: "all subcommands allowed" };
+    if (parsed.commands.length === 0 && !ask) return policy("allow", "no commands");
+    if (ask) return askRule ? byRule("ask", askRule, ask) : policy("ask", ask);
+    return allowedBy ? byRule("allow", allowedBy, "all subcommands allowed") : policy("allow", "all subcommands allowed");
   }
 
-  private findRule(list: RuleList, toolName: string, c: SimpleCommand): Rule | undefined {
+  private findRule(list: RuleList, toolName: string, c: SimpleCommand): SourcedRule | undefined {
     const match = (r: Rule) => r.tool === toolName && (!r.specifier || matchCommand(r.specifier, c.argv));
     return this.sessionRules[list].find(match) ?? this.rules[list].find(match);
   }
@@ -287,7 +331,7 @@ export class PolicyEngine {
   private byRules(pred: (r: Rule) => boolean): Decision | null {
     for (const list of ["deny", "ask", "allow"] as const) {
       const r = [...this.sessionRules[list], ...this.rules[list]].find(pred);
-      if (r) return { kind: list, reason: `rule ${r.raw}` };
+      if (r) return byRule(list, r);
     }
     return null;
   }

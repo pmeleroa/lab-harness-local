@@ -25,7 +25,8 @@ import {
 } from "../context/manager.js";
 import { OVERFLOW_MIN_GROWTH_COMPACT, type RequestSample, looksTruncated } from "../context/overflow.js";
 import type { HookRunner } from "../hooks/runner.js";
-import type { PolicyEngine } from "../policy/engine.js";
+import type { Decision, PolicyEngine } from "../policy/engine.js";
+import type { SessionRecord, SessionStore } from "../session/jsonl-store.js";
 import { FileStateCache } from "../tools/file-state.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { AgentEvent, AgentRef, AgentState, EventBus, RunEndReason } from "./events.js";
@@ -101,6 +102,8 @@ export interface AgentDeps {
   approvalLock?: ApprovalLock;
   /** Identidad del agente si es un subagente (va en las peticiones de permiso). */
   ref?: AgentRef;
+  /** Transcript: cada mensaje, uso, compactación y decisión de permisos, en el orden en que pasan. */
+  session: SessionStore;
 }
 
 export interface RunResult {
@@ -147,6 +150,20 @@ export class Agent {
 
   get state(): AgentState {
     return this._state;
+  }
+
+  /**
+   * Sustituye la conversación y el destino del transcript (resume). Solo con el agente parado:
+   * a mitad de un run() dejaría la conversación inconsistente.
+   */
+  restore(messages: Message[], session: SessionStore): void {
+    if (this._state !== "idle" && this._state !== "done" && this._state !== "aborted" && this._state !== "error")
+      throw new Error(`Cannot restore a session while the agent is ${this._state}.`);
+    this.messages.splice(0, this.messages.length, ...messages);
+    this.deps.session = session;
+    this.clearing.reset();
+    this.measured = null;
+    this.lastSample = null;
   }
 
   get contextWindow(): number {
@@ -210,6 +227,7 @@ export class Agent {
         const u = res.usage;
         peakContext = Math.max(peakContext, u.inputTokens + u.cacheReadTokens + u.cacheWriteTokens + u.outputTokens);
         this.emit({ t: "turn_end", turn, usage: res.usage, ...(res.truncated ? { truncated: true } : {}) });
+        this.deps.session.append({ type: "usage", ts: now(), turn, usage: res.usage });
         // El servidor recortó la conversación y respondió igual: lo dicho no parte de la tarea. Se descarta la
         // respuesta, la historia sigue completa en `messages` y el run acaba con nombre en vez de pasar por normal.
         if (res.truncated) return end("context_overflow", turn, this.overflowMessage(res.sent));
@@ -236,6 +254,7 @@ export class Agent {
       }
 
       this.messages.push(assistant);
+      this.deps.session.append({ type: "message", ts: now(), message: assistant });
       lastText = textOf(assistant) || lastText;
 
       // 2. ¿Terminó?
@@ -249,8 +268,9 @@ export class Agent {
       // 3. Herramientas. Todo tool_use recibe su tool_result, pase lo que pase.
       toolCalls += calls.length;
       this.setState("executing_tools");
+      // Cada resultado ya está en el transcript (lo escribe executeCalls al acabar su llamada): aquí solo en memoria.
       const results = await this.executeCalls(calls, signal);
-      this.pushUser(results);
+      this.pushUser(results, false, false);
 
       if (signal.aborted) return end("aborted", turn);
       if (toolCalls >= this.cfg.maxToolCalls) return end("max_tool_calls", turn);
@@ -384,6 +404,8 @@ export class Agent {
     this.clearing.reset();
     this.measured = null;
     this.lastSample = null;
+    // La historia anterior no se borra del transcript: este registro dice que, desde aquí, se empieza por el resumen.
+    this.deps.session.append({ type: "compact", ts: now(), summary, ...(keep ? { kept: keep } : {}) });
     this.emit({ t: "context", action: "compacted", before, after: this.contextTokens() });
     return end.usage;
   }
@@ -400,8 +422,14 @@ export class Agent {
   private async executeCalls(calls: ToolUseBlock[], signal: AbortSignal): Promise<ToolResultBlock[]> {
     const results: ToolResultBlock[] = [];
     let batch: ToolUseBlock[] = [];
+    // Cada resultado se escribe al acabar su llamada (o su lote en paralelo), en orden: un corte a mitad de turno no
+    // pierde los de las tools que ya corrieron. Al leer, los mensajes de usuario seguidos se fusionan en uno.
+    const done = (rs: ToolResultBlock[]) => {
+      results.push(...rs);
+      if (rs.length) this.deps.session.append({ type: "message", ts: now(), message: { role: "user", content: rs } });
+    };
     const flush = async () => {
-      results.push(...(await Promise.all(batch.map((c) => this.executeOne(c, signal)))));
+      done(await Promise.all(batch.map((c) => this.executeOne(c, signal))));
       batch = [];
     };
     for (const call of calls) {
@@ -410,7 +438,7 @@ export class Agent {
         continue;
       }
       await flush();
-      results.push(await this.executeOne(call, signal));
+      done([await this.executeOne(call, signal)]);
     }
     await flush();
     return results;
@@ -437,6 +465,8 @@ export class Agent {
       const pre = await this.deps.hooks.run("PreToolUse", { tool: call.name, input }, signal);
       if (pre.block) {
         this.emit({ t: "hook_blocked", call, message: pre.message });
+        // El hook va antes que el motor: no hay decisión de permisos, la decisión es del hook.
+        this.recordApproval(call, { decision: "deny", origin: "hook", reason: pre.message });
         return result(pre.message, true);
       }
       // Si se canceló mientras corría el hook, el runner lo mata y no bloquea: no se sigue hacia los permisos ni la tool.
@@ -453,26 +483,45 @@ export class Agent {
     let allowed = decision.kind === "allow";
     let denyMessage = `Permission denied: ${decision.reason}.`;
     if (decision.kind === "ask") {
-      source = "user";
-      const answer = await this.approvalLock.run(async (): Promise<ApprovalAnswer> => {
+      const settled = await this.approvalLock.run(async (): Promise<{ by: "policy"; decision: Decision } | { by: "user"; answer: ApprovalAnswer }> => {
         // Las llamadas en paralelo se evalúan antes de que el usuario responda a la primera: si un «siempre» ya
-        // cubre a esta, se reevalúa con las reglas de sesión actuales en lugar de volver a preguntar.
+        // cubre a esta, se reevalúa con las reglas de sesión actuales en lugar de volver a preguntar. Entonces no
+        // decide el usuario, sino la regla que creó.
         const again = this.deps.policy.evaluate(call, target);
-        if (again.kind === "allow") return { kind: "allow_once" };
-        if (again.kind === "deny") return { kind: "deny", feedback: again.reason };
+        if (again.kind !== "ask") return { by: "policy", decision: again };
         this.emit({ t: "permission_request", call, reason: decision.reason });
-        return this.deps.approver({
+        const answer = await this.deps.approver({
           call,
           reason: decision.reason,
           suggestedRule: this.deps.policy.suggestRule(call, target),
           ...(this.deps.ref ? { agent: this.deps.ref } : {}),
         });
+        return { by: "user", answer };
       });
       if (signal.aborted) return result(INTERRUPTED, true);
-      allowed = answer.kind !== "deny";
-      if (answer.kind === "allow_always") this.deps.policy.addSessionRule("allow", answer.rule);
-      if (answer.kind === "deny")
-        denyMessage = `The user denied this action${answer.feedback ? `: ${answer.feedback}` : "."} Do not retry it with another tool; ask the user how to proceed if needed.`;
+      if (settled.by === "policy") {
+        const again = settled.decision;
+        allowed = again.kind === "allow";
+        if (!allowed) denyMessage = `Permission denied: ${again.reason}.`;
+        this.recordApproval(call, fromDecision(again));
+      } else {
+        const { answer } = settled;
+        source = "user";
+        allowed = answer.kind !== "deny";
+        if (answer.kind === "allow_always") this.deps.policy.addSessionRule("allow", answer.rule);
+        if (answer.kind === "deny")
+          denyMessage = `The user denied this action${answer.feedback ? `: ${answer.feedback}` : "."} Do not retry it with another tool; ask the user how to proceed if needed.`;
+        this.recordApproval(call, {
+          decision: allowed ? "allow" : "deny",
+          origin: "user",
+          reason: decision.reason,
+          answer: answer.kind === "allow_once" ? "once" : answer.kind === "allow_always" ? "always" : "no",
+          ...(answer.kind === "allow_always" ? { rule: answer.rule } : {}),
+          ...(answer.kind === "deny" && answer.feedback ? { feedback: answer.feedback } : {}),
+        });
+      }
+    } else {
+      this.recordApproval(call, fromDecision(decision));
     }
     this.emit({ t: "permission_decision", call, decision: allowed ? "allow" : "deny", source, reason: decision.reason });
     if (!allowed) return withNotes(result(denyMessage, true));
@@ -521,17 +570,23 @@ export class Agent {
     ].join("\n");
   }
 
+  /** Una línea `approval` por decisión, entre el tool_use y su tool_result: quién decidió y por qué. */
+  private recordApproval(call: ToolUseBlock, d: Omit<Extract<SessionRecord, { type: "approval" }>, "type" | "ts" | "toolUseId" | "tool">): void {
+    this.deps.session.append({ type: "approval", ts: now(), toolUseId: call.id, tool: call.name, ...d });
+  }
+
   /** Siempre hay un mensaje de usuario al final cuando se llama: el prompt, los tool_result o el aviso de respuesta vacía. */
   private deliverNotifications(): void {
     const blocks = this.deps.notifications?.drain() ?? [];
-    if (blocks.length) this.pushUser(blocks);
+    if (blocks.length) this.pushUser(blocks, true);
   }
 
   /** La API exige alternancia: bloques de usuario consecutivos se fusionan en un mensaje. */
-  private pushUser(content: Block[]): void {
+  private pushUser(content: Block[], notice = false, persist = true): void {
     const last = this.messages.at(-1);
     if (last?.role === "user") last.content.push(...content);
     else this.messages.push({ role: "user", content: [...content] });
+    if (persist) this.deps.session.append({ type: "message", ts: now(), message: { role: "user", content }, ...(notice ? { notice: true as const } : {}) });
   }
 
   private setState(s: AgentState): void {
@@ -543,6 +598,19 @@ export class Agent {
   private emit(e: AgentEvent): void {
     this.deps.bus.emit(e);
   }
+}
+
+const now = () => new Date().toISOString();
+
+/** Una decisión del motor tal como va al registro `approval` (un `ask` nunca llega aquí: lo decide el usuario). */
+function fromDecision(d: Decision) {
+  return {
+    decision: d.kind === "allow" ? ("allow" as const) : ("deny" as const),
+    origin: d.origin,
+    reason: d.reason,
+    ...(d.rule ? { rule: d.rule } : {}),
+    ...(d.ruleSource ? { ruleSource: d.ruleSource } : {}),
+  };
 }
 
 function errorMessage(e: unknown): string {

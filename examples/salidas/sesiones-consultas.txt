@@ -1,0 +1,63 @@
+$ ls ~/.harness/sessions/
+tienda-demo-924c9f5d
+$ for f in $(ls -t ~/.harness/sessions/tienda-demo-*/*.jsonl); do jq -rn --arg id "$(basename "$f" .jsonl)" 'first(inputs | select(.type == "message" and .message.role == "user")) | "\($id[:8])  \(.message.content[0].text[:70])"' "$f"; done
+eed0eae7  Lee enteros con Read, sin limit ni offset, src/cart.ts, src/pricing.ts
+742e58fb  Usa un subagente explore, sin run_in_background, con este prompt: «Lee
+b2341b49  Añade a src/cart.ts una función exportada itemCount(items: Item[]): nu
+e6b58a58  Añade a src/cart.ts una función exportada itemCount(items: Item[]): nu
+$ S=$(ls ~/.harness/sessions/*/e6b58a58*.jsonl)
+
+# Lo que devolvió cada llamada: ok o error (una denegación también es un error)
+$ R=$(jq -s 'map(select(.type == "message") | .message.content[] | select(.type == "tool_result") | {(.tool_use_id): (if .is_error then "error" else "ok" end)}) | add' "$S")
+
+# Qué ficheros tocó
+$ jq -r --argjson r "$R" 'select(.type == "message") | .message.content[] | select(.type == "tool_use" and (.name == "Edit" or .name == "Write")) | "\(.id)  \($r[.id] // "-")  \(.name) \(.input.file_path)"' "$S"
+call_zfc6co2m  error  Edit src/cart.ts
+call_4dg9wnnr  error  Edit test/cart.test.ts
+call_cmwyu6m1  ok  Edit src/cart.ts
+call_p64c4lkr  ok  Write test/cart.test.ts
+call_r1f4v7sd  error  Edit test/cart.test.ts
+call_nxbnabry  error  Edit test/cart.test.ts
+call_34pw5o7x  error  Edit test/cart.test.ts
+call_j8t8qrlp  error  Edit test/cart.test.ts
+call_ztxro9rv  ok  Edit test/cart.test.ts
+
+# Qué comandos lanzó
+$ jq -r --argjson r "$R" 'if .type == "task" then "\(.id)  \(.status) \(.exitCode // "")  & \(.description)" else (select(.type == "message") | .message.content[] | select(.type == "tool_use" and .name == "Bash") | "\(.id)  \($r[.id] // "-")  $ \(.input.command)") end' "$S"
+call_yi7ni766  error  $ git add -A && git commit -m "feat(cart): add itemCount and test"
+call_1q8mbe74  error  $ git add -A && git commit -m "feat(cart): add itemCount and test"
+call_stfiylph  ok  $ git add -A
+call_6s28fo7d  ok  $ git add -A
+call_bupz6s7d  error  $ git commit -m "feat(cart): add itemCount function and test"
+call_wxtd60tc  ok  $ git add -A
+call_ia5s54tq  error  $ git add -A
+call_2yw76ve6  error  $ git commit -m "feat(cart): add itemCount function and test" -m "test(cart.test): add test for itemCount function" -m "docs: update README if needed"
+call_3zpmwbib  error  $ git add -A
+call_zt6kwq6q  ok  $ git add -A
+call_x75ccs98  error  $ git add -A
+call_j09hvwlp  error  $ git add -A && git commit -m 'Add itemCount function and test for cart empty state'
+
+# Quién aprobó cada acción, sin lo que decide sola la política
+$ jq -r 'select(.type == "approval" and .origin != "policy") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback] | map(select(. != null)) | join("  "))' "$S" $(ls "${S%.jsonl}"/agents/*.jsonl 2>/dev/null)
+call_cmwyu6m1  Edit  allow  user  once
+call_p64c4lkr  Write  allow  user  once
+call_yi7ni766  Bash  deny  user  no  no: haz git add -A y git commit en dos llamadas a Bash distintas, como te pedí
+call_1q8mbe74  Bash  deny  user  no  no: primero solo git add -A, y el commit en otra llamada
+call_stfiylph  Bash  allow  user  always  Bash(git add *)
+call_6s28fo7d  Bash  allow  rule  session  Bash(git add *)
+call_wxtd60tc  Bash  allow  user  once
+call_ia5s54tq  Bash  deny  user  no  no: ya está añadido; falta el caso del carrito vacío en test/cart.test.ts y el commit
+call_2yw76ve6  Bash  deny  user  no  no: antes añade a test/cart.test.ts el caso del carrito vacío; luego un commit con un solo -m
+call_3zpmwbib  Bash  deny  user  no  no: no has añadido el caso; usa Edit en test/cart.test.ts para añadir un it con un carrito vacío
+call_j8t8qrlp  Edit  allow  user  once
+call_ztxro9rv  Edit  allow  user  once
+call_zt6kwq6q  Bash  allow  user  once
+call_x75ccs98  Bash  deny  user  no  no: ya está añadido; haz ya el git commit
+call_j09hvwlp  Bash  deny  hook
+
+# Lo mismo con la política, en la sesión del explore: el principal y su agents/
+$ S=$(ls ~/.harness/sessions/*/742e58fb*.jsonl)
+$ jq -r 'select(.type == "approval") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback, .reason] | map(select(. != null)) | join("  "))' "$S" $(ls "${S%.jsonl}"/agents/*.jsonl 2>/dev/null)
+call_sagbr7f6  Agent  allow  policy  subagent explore: its tools go through its own policy
+call_g4vbkv35  Read  allow  policy  read inside workspace
+call_cc79osdu  Read  allow  policy  read inside workspace
