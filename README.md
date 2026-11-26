@@ -124,7 +124,7 @@ Las reglas se leen del bloque `permissions` de `<workspace>/.harness/settings.js
 
 Lo que no hace: el prompt de aprobación muestra herramienta y ruta, no el diff; la protección de `.harness/settings.json` no viene integrada (es una regla); y nada impide que el modelo escriba algo dañino dentro del workspace en `acceptEdits`. Los permisos limitan dónde, no qué: lo que se escribió se revisa con `git diff`.
 
-El modo `plan` solo lee: todo lo que preguntaría se deniega, así que leer dentro del workspace y los comandos de solo lectura pasan, y escribir, los comandos que pueden escribir y las tools MCP no. Se activa con `--permission-mode plan` o con `defaultMode: "plan"` en `settings.json`: un repositorio puede restringirse, no ampliarse. Es el modo del subagente `explore`.
+El modo `plan` solo lee: todo lo que preguntaría se deniega, así que leer dentro del workspace y los comandos de solo lectura pasan, y escribir, los comandos que pueden escribir y las tools MCP no, aunque una regla `allow` (de `settings.json` o aceptada con «siempre») los permita. Se activa con `--permission-mode plan` o con `defaultMode: "plan"` en `settings.json`: un repositorio puede restringirse, no ampliarse. Es el modo del subagente `explore`.
 
 ## Comandos y sandbox
 
@@ -255,7 +255,7 @@ Diferencias con `harness`: el lab solo lee las definiciones del proyecto (sin ca
 
 ### El ejemplo: leer seis ficheros, con y sin subagente
 
-`examples/delegacion` es una tienda con planes de suscripción. La tarea es leer seis ficheros enteros y resumir qué hace cada uno: sin subagente, todo lo leído entra en la ventana del principal; con él, entra en la del subagente. La demo trabaja sobre una copia, y `examples/comprobar-delegacion.mjs` comprueba que la respuesta nombra los seis ficheros y que la traza muestra que se leyeron enteros. Con `-s`, `npm` no escribe en la salida su cabecera con el comando, que incluye los nombres de los ficheros:
+`examples/delegacion` es una tienda con planes de suscripción. La tarea es leer seis ficheros enteros y resumir qué hace cada uno: sin subagente, todo lo leído entra en la ventana del principal; con él, entra en la del subagente. La demo trabaja sobre una copia, y `examples/comprobar-delegacion.mjs` comprueba que la respuesta nombra los seis ficheros y que la traza muestra que se leyeron enteros y sin error, en las rutas del workspace. Con `-s`, `npm` no escribe en la salida su cabecera con el comando, que incluye los nombres de los ficheros:
 
 ```bash
 cp -r examples/delegacion ~/tienda-planes

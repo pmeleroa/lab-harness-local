@@ -123,6 +123,44 @@ describe("modo plan y política de los subagentes", () => {
     expect(policy.evaluate(call("Bash", {}), { kind: "command", command: "touch x" }).kind).toBe("deny");
   });
 
+  it("en plan ninguna regla allow, de settings o de sesión, abre una escritura", async () => {
+    const ws = tmp();
+    const parent = new PolicyEngine(
+      { workspace: ws, mode: "acceptEdits", rules: { ...emptyRules(), allow: ["Edit", "Bash(touch *)", "Bash(npm test *)"] } },
+      await BashParser.create(),
+    );
+    parent.addSessionRule("allow", "Bash(make *)");
+    const target = { kind: "path" as const, path: path.join(ws, "a.txt"), access: "write" as const };
+    // El padre escribe con sus reglas; el hijo en plan, con las mismas reglas heredadas, no.
+    expect(parent.evaluate(call("Write", {}), target).kind).toBe("allow");
+    const child = parent.derive("plan");
+    for (const name of ["Write", "Edit"]) expect(child.evaluate(call(name, {}), target)).toMatchObject({ kind: "deny", reason: expect.stringMatching(/^plan mode: /) });
+    for (const command of ["touch x", "npm test -- x", "make all", "ls > lista.txt", "ls && touch x"])
+      expect(child.evaluate(call("Bash", {}), { kind: "command", command })).toMatchObject({ kind: "deny", reason: expect.stringMatching(/^plan mode: /) });
+    // Leer y los comandos de solo lectura siguen pasando; un deny conserva su motivo.
+    expect(child.evaluate(call("Read", {}), { ...target, access: "read" }).kind).toBe("allow");
+    expect(child.evaluate(call("Bash", {}), { kind: "command", command: "grep -rn x . 2>/dev/null" }).kind).toBe("allow");
+    const denied = new PolicyEngine({ workspace: ws, mode: "plan", rules: { ...emptyRules(), deny: ["Edit"] } }, await BashParser.create());
+    expect(denied.evaluate(call("Edit", {}), target).reason).toBe("rule Edit");
+  });
+
+  it("explore en plan no escribe aunque el principal tenga una regla allow que lo cubra", async () => {
+    const ws = tmp();
+    const { h, provider } = await setup(
+      scripted(
+        (_r, turn) =>
+          turn === 1 ? { content: [use("p1", "Agent", { description: "x", prompt: "escribe", subagent_type: "explore" })] } : { content: [text("ok")] },
+        (_r, turn) => (turn === 1 ? { content: [use("c1", "Bash", { command: "touch x.txt" })] } : { content: [text("no pude")] }),
+      ),
+      { workspace: ws, rules: { allow: ["Bash(touch *)"] } },
+    );
+    await h.agent.run("x");
+    const childResult = lastResults(provider.requests.filter(isChild)[1]!)[0]!;
+    expect(childResult.is_error).toBe(true);
+    expect(childResult.content).toMatch(/plan mode/);
+    expect(existsSync(path.join(ws, "x.txt"))).toBe(false);
+  });
+
   it("en plan no pasa ninguna tool MCP, ni con una regla allow", async () => {
     const ws = tmp();
     const policy = new PolicyEngine({ workspace: ws, mode: "plan", rules: { ...emptyRules(), allow: ["mcp__github"] } }, await BashParser.create());

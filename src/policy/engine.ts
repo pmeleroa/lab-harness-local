@@ -104,8 +104,13 @@ export class PolicyEngine {
 
   evaluate(call: ToolUseBlock, target: PermissionTarget): Decision {
     const d = this.evaluateRaw(call, target);
-    // En `plan` nada que requiera confirmación se ejecuta: solo lo que ya se permite sin preguntar (leer).
-    if (this.cfg.mode === "plan" && d.kind === "ask") return { kind: "deny", reason: `plan mode: ${d.reason}` };
+    if (this.cfg.mode === "plan" && d.kind !== "deny") {
+      // En `plan` solo se lee: lo que puede escribir se deniega aunque una regla allow lo permita, y lo que
+      // requiere confirmación, también. Las reglas no amplían `plan`, y paralelo y segundo plano cuentan con ello.
+      const write = this.planWrite(target);
+      if (write) return { kind: "deny", reason: `plan mode: ${write}` };
+      if (d.kind === "ask") return { kind: "deny", reason: `plan mode: ${d.reason}` };
+    }
     // `bypass` convierte cualquier `ask` en `allow`; un `deny` no se toca.
     if (this.cfg.mode === "bypass" && d.kind === "ask") return { kind: "allow", reason: `bypass mode (${d.reason})` };
     return d;
@@ -144,6 +149,24 @@ export class PolicyEngine {
       );
     if (hit("deny", absPath)) return true;
     return hit("ask", absPath) && !hit("ask", root);
+  }
+
+  /**
+   * Por qué un objetivo puede escribir, o null si solo lee: escribir una ruta, un comando que no es de solo lectura
+   * (o que ejecuta otros) y cualquier redirección a fichero. No mira reglas: es lo que `plan` deniega siempre.
+   */
+  private planWrite(target: PermissionTarget): string | null {
+    if (target.kind === "path") return target.access === "write" ? `write ${target.path}` : null;
+    if (target.kind !== "command") return null;
+    const parsed = this.bash.parse(target.command);
+    if (parsed.problems[0]) return parsed.problems[0];
+    for (const c of parsed.commands) {
+      const opaque = opaqueReason(c.argv);
+      if (opaque) return `${opaque}: ${c.text}`;
+      if (!isReadOnly(c.argv)) return `run: ${c.text}`;
+    }
+    const w = parsed.writes[0];
+    return w ? `redirect writes ${w.value}` : null;
   }
 
   private evaluateRaw(call: ToolUseBlock, target: PermissionTarget): Decision {
