@@ -14,6 +14,7 @@ import {
   JsonlSessionStore,
   RESUME_INTERRUPTED,
   type SessionRecord,
+  missingResults,
   repairTranscript,
   sessionsDirOf,
   sessionsRoot,
@@ -104,20 +105,25 @@ describe("el transcript", () => {
     expect(records(s.file).filter((r) => r.type === "message")).toHaveLength(5);
   });
 
-  it("repairTranscript: un tool_use sin tool_result al final recibe uno sintético", () => {
+  it("repairTranscript: solo reciben un tool_result sintético los tool_use del último turno que no lo tienen", () => {
     const cut: Message[] = [
       { role: "user", content: [text("edita")] },
       { role: "assistant", content: [text("voy"), use("e1", "Edit", {}), use("b1", "Bash", {})] },
     ];
-    expect(repairTranscript(cut).at(-1)).toEqual({
-      role: "user",
-      content: [
-        { type: "tool_result", tool_use_id: "e1", content: RESUME_INTERRUPTED, is_error: true },
-        { type: "tool_result", tool_use_id: "b1", content: RESUME_INTERRUPTED, is_error: true },
-      ],
-    });
-    const whole: Message[] = [...cut, { role: "user", content: [{ type: "tool_result", tool_use_id: "e1", content: "ok" }] }];
+    const synthetic = (id: string) => ({ type: "tool_result", tool_use_id: id, content: RESUME_INTERRUPTED, is_error: true });
+    // Cortado antes de que acabara ninguna: todas.
+    expect(repairTranscript(cut).at(-1)).toEqual({ role: "user", content: [synthetic("e1"), synthetic("b1")] });
+    // Cortado a mitad: el Edit acabó y su resultado está; solo falta el del Bash, detrás.
+    const half: Message[] = [...cut, { role: "user", content: [{ type: "tool_result", tool_use_id: "e1", content: "ok" }] }];
+    expect(missingResults(half)).toEqual([synthetic("b1")]);
+    expect(repairTranscript(half).at(-1)).toEqual({ role: "user", content: [{ type: "tool_result", tool_use_id: "e1", content: "ok" }, synthetic("b1")] });
+    // Completo: nada que reparar.
+    const whole: Message[] = [
+      ...cut,
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "e1", content: "ok" }, { type: "tool_result", tool_use_id: "b1", content: "ok" }] },
+    ];
     expect(repairTranscript(whole)).toEqual(whole);
+    expect(repairTranscript([...whole, { role: "assistant", content: [text("hecho")] }])).toHaveLength(4);
   });
 
   it("la clave: estable con la misma ruta, distinta con dos rutas del mismo nombre e igual a través de un enlace", () => {
@@ -243,6 +249,48 @@ describe("retomar: --continue, --resume y --fork-session", () => {
       ["assistant", ["text"]],
       ["user", ["text"]],
     ]);
+  });
+
+  it("un corte a mitad de turno guarda los resultados de lo que ya corrió; al retomar solo se repara lo que faltaba", async () => {
+    const ws = tmp("lab-sessions-ws-");
+    writeFileSync(path.join(ws, "a.txt"), "uno\n");
+    let n = 0;
+    // El Edit se aprueba y corre, el Write se rechaza con motivo y el Bash se queda en la pregunta.
+    const approver: Approver = () =>
+      ++n === 1 ? Promise.resolve({ kind: "allow_once" }) : n === 2 ? Promise.resolve({ kind: "deny", feedback: "ahí no" }) : new Promise(() => {});
+    const cut = await start(
+      (_r, turn) =>
+        turn === 1
+          ? { content: [use("r1", "Read", { file_path: "a.txt" })] }
+          : {
+              content: [
+                use("e1", "Edit", { file_path: "a.txt", old_string: "uno", new_string: "dos" }),
+                use("w1", "Write", { file_path: "b.txt", content: "x" }),
+                use("b1", "Bash", { command: "touch c.txt" }),
+              ],
+            },
+      { workspace: ws, approver },
+    );
+    void cut.h.agent.run("cambia a.txt, crea b.txt y toca c.txt");
+    await vi_waitFor(() => n === 3);
+    const file = fileOf(cut.h);
+    expect(readFileSync(path.join(ws, "a.txt"), "utf8")).toBe("dos\n");
+    const results = records(file).flatMap((r) => (r.type === "message" ? r.message.content.filter((b) => b.type === "tool_result") : []));
+    expect(results.map((b) => (b as { tool_use_id: string }).tool_use_id)).toEqual(["r1", "e1", "w1"]);
+    expect(approvalsIds(file)).toEqual(["r1", "e1", "w1"]);
+
+    const { h, provider } = await start(answer("retomo"), { workspace: ws, continueLatest: true });
+    await h.agent.run("sigue");
+    const last = provider.requests[0]!.messages.at(-1)!.content;
+    expect(last.map((b) => (b.type === "tool_result" ? `${b.tool_use_id}:${b.content === RESUME_INTERRUPTED ? "sintético" : "real"}` : b.type))).toEqual([
+      "e1:real",
+      "w1:real",
+      "b1:sintético",
+      "text",
+    ]);
+    // Escrito en el transcript: solo el que faltaba.
+    const synthetic = records(file).filter((r) => r.type === "message" && r.message.content.some((b) => b.type === "tool_result" && b.content === RESUME_INTERRUPTED));
+    expect(synthetic).toHaveLength(1);
   });
 
   it("lo que no se restaura: el modo, los «siempre» y lo leído; el modelo y la ventana salen de esta invocación", async () => {
@@ -387,6 +435,8 @@ describe("las sesiones, protegidas del propio agente", () => {
     expect(args[i - 1]).toBe("--tmpfs");
   });
 });
+
+const approvalsIds = (file: string) => records(file).flatMap((r) => (r.type === "approval" ? [r.toolUseId] : []));
 
 /** Espera activa corta: el run sigue en segundo plano. */
 async function vi_waitFor(cond: () => boolean, ms = 2000) {

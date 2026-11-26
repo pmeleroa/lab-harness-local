@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { summaryMessage } from "../context/manager.js";
 import type { TaskKind, TaskStatus } from "../core/background.js";
-import type { Block, Message, ToolSpec, Usage } from "../providers/canonical.js";
+import type { Message, ToolResultBlock, ToolSpec, Usage } from "../providers/canonical.js";
 
 /** Quién decidió una llamada: una regla, el modo de permisos, la política del motor, el usuario o un hook. */
 export type ApprovalOrigin = "rule" | "mode" | "policy" | "user" | "hook";
@@ -285,18 +285,32 @@ export function forkSession(dir: string, source: string, o: { workspace: string;
 export const RESUME_INTERRUPTED = "Session ended before this tool ran.";
 
 /**
- * Deja la conversación lista para continuar: si la sesión se cortó con un tool_use sin
- * su tool_result (un Ctrl+C en una pregunta de permiso, un crash a mitad de tools), se añaden resultados
- * sintéticos. La API rechaza un tool_use sin resultado emparejado.
+ * Los tool_result que le faltan al último turno, sintéticos: los de todas sus llamadas si se cortó antes de que acabara
+ * ninguna, y los de las que no acabaron si se cortó a mitad (un Ctrl+C en una pregunta de permiso, un crash). Las que
+ * sí acabaron tienen su resultado en el transcript, porque se escribe al acabar cada una.
  */
+export function missingResults(messages: Message[]): ToolResultBlock[] {
+  const last = messages.at(-1);
+  const at = last?.role === "assistant" ? messages.length - 1 : last?.role === "user" && messages.at(-2)?.role === "assistant" ? messages.length - 2 : -1;
+  if (at < 0) return [];
+  const answered = new Set(messages[at + 1]?.content.flatMap((b) => (b.type === "tool_result" ? [b.tool_use_id] : [])) ?? []);
+  return messages[at]!.content.flatMap((b) =>
+    b.type === "tool_use" && !answered.has(b.id) ? [{ type: "tool_result" as const, tool_use_id: b.id, content: RESUME_INTERRUPTED, is_error: true }] : [],
+  );
+}
+
+/** Deja la conversación lista para continuar: la API rechaza un tool_use sin resultado emparejado. */
 export function repairTranscript(messages: Message[]): Message[] {
   const out = messages.map((m) => ({ role: m.role, content: [...m.content] }));
-  const last = out.at(-1);
-  if (last?.role !== "assistant") return out;
-  const results: Block[] = last.content
-    .filter((b) => b.type === "tool_use")
-    .map((b) => ({ type: "tool_result", tool_use_id: (b as { id: string }).id, content: RESUME_INTERRUPTED, is_error: true }));
-  if (results.length) out.push({ role: "user", content: results });
+  const missing = missingResults(out);
+  if (!missing.length) return out;
+  const last = out.at(-1)!;
+  if (last.role === "assistant") out.push({ role: "user", content: missing });
+  else {
+    // Detrás de los resultados que ya había y antes de cualquier otro bloque.
+    const i = last.content.findIndex((b) => b.type !== "tool_result");
+    last.content.splice(i < 0 ? last.content.length : i, 0, ...missing);
+  }
   return out;
 }
 

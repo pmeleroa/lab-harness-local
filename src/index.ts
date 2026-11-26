@@ -34,6 +34,7 @@ import {
   type SessionSummary,
   forkSession,
   listSessions,
+  missingResults,
   repairTranscript,
   resolveSession,
   sessionsDirOf,
@@ -399,11 +400,11 @@ export async function createHarness(o: HarnessOptions = {}): Promise<Harness> {
   // «siempre», lo leído y el modelo y la ventana no vienen de la sesión: vienen de esta invocación.
   if (resumed) {
     const read = JsonlSessionStore.readMessages(resumed.file);
-    const repaired = repairTranscript(read);
     // La reparación se escribe: si solo estuviera en memoria, la siguiente retomada (o un fork) leería otra vez el
     // tool_use sin su tool_result, ya en mitad de la conversación, donde repairTranscript no mira.
-    if (repaired.length > read.length) session.append({ type: "message", ts: new Date().toISOString(), message: repaired.at(-1)! });
-    agent.restore(repaired, session);
+    const missing = missingResults(read);
+    if (missing.length) session.append({ type: "message", ts: new Date().toISOString(), message: { role: "user", content: missing } });
+    agent.restore(repairTranscript(read), session);
   }
 
   // Inicio y fin de cada tarea en segundo plano, en el transcript.

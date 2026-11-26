@@ -268,8 +268,9 @@ export class Agent {
       // 3. Herramientas. Todo tool_use recibe su tool_result, pase lo que pase.
       toolCalls += calls.length;
       this.setState("executing_tools");
+      // Cada resultado ya está en el transcript (lo escribe executeCalls al acabar su llamada): aquí solo en memoria.
       const results = await this.executeCalls(calls, signal);
-      this.pushUser(results);
+      this.pushUser(results, false, false);
 
       if (signal.aborted) return end("aborted", turn);
       if (toolCalls >= this.cfg.maxToolCalls) return end("max_tool_calls", turn);
@@ -421,8 +422,14 @@ export class Agent {
   private async executeCalls(calls: ToolUseBlock[], signal: AbortSignal): Promise<ToolResultBlock[]> {
     const results: ToolResultBlock[] = [];
     let batch: ToolUseBlock[] = [];
+    // Cada resultado se escribe al acabar su llamada (o su lote en paralelo), en orden: un corte a mitad de turno no
+    // pierde los de las tools que ya corrieron. Al leer, los mensajes de usuario seguidos se fusionan en uno.
+    const done = (rs: ToolResultBlock[]) => {
+      results.push(...rs);
+      if (rs.length) this.deps.session.append({ type: "message", ts: now(), message: { role: "user", content: rs } });
+    };
     const flush = async () => {
-      results.push(...(await Promise.all(batch.map((c) => this.executeOne(c, signal)))));
+      done(await Promise.all(batch.map((c) => this.executeOne(c, signal))));
       batch = [];
     };
     for (const call of calls) {
@@ -431,7 +438,7 @@ export class Agent {
         continue;
       }
       await flush();
-      results.push(await this.executeOne(call, signal));
+      done([await this.executeOne(call, signal)]);
     }
     await flush();
     return results;
@@ -575,11 +582,11 @@ export class Agent {
   }
 
   /** La API exige alternancia: bloques de usuario consecutivos se fusionan en un mensaje. */
-  private pushUser(content: Block[], notice = false): void {
+  private pushUser(content: Block[], notice = false, persist = true): void {
     const last = this.messages.at(-1);
     if (last?.role === "user") last.content.push(...content);
     else this.messages.push({ role: "user", content: [...content] });
-    this.deps.session.append({ type: "message", ts: now(), message: { role: "user", content }, ...(notice ? { notice: true as const } : {}) });
+    if (persist) this.deps.session.append({ type: "message", ts: now(), message: { role: "user", content }, ...(notice ? { notice: true as const } : {}) });
   }
 
   private setState(s: AgentState): void {
