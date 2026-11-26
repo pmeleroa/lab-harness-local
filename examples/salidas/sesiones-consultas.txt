@@ -55,6 +55,15 @@ call_zt6kwq6q  Bash  allow  user  once
 call_x75ccs98  Bash  deny  user  no  no: ya está añadido; haz ya el git commit
 call_j09hvwlp  Bash  deny  hook
 
+# Cada arranque, su meta
+$ jq -c 'select(.type == "meta") | {ts, model, contextWindow}' "$S"
+{"ts":"2026-11-26T11:40:02.744Z","model":"qwen2.5:7b","contextWindow":8192}
+{"ts":"2026-11-26T11:41:52.816Z","model":"qwen2.5:7b","contextWindow":8192}
+
+# Lo que se reparó al retomar
+$ jq -r 'select(.type == "message") | .message.content[] | select(.type == "tool_result" and .content == "Session ended before this tool ran.") | .tool_use_id' "$S"
+call_bupz6s7d
+
 # Lo mismo con la política, en la sesión del explore: el principal y su agents/
 $ S=$(ls ~/.harness/sessions/*/742e58fb*.jsonl)
 $ jq -r 'select(.type == "approval") | "\(.toolUseId)  " + ([.tool, .decision, .origin, .answer, .ruleSource, .rule, .feedback, .reason] | map(select(. != null)) | join("  "))' "$S" $(ls "${S%.jsonl}"/agents/*.jsonl 2>/dev/null)
